@@ -10,6 +10,8 @@
   T4 Unicode/空格/特殊字符文件名: 全流程通过
   T5 junction 穿透: 指向 $AllowedRoot 外的链接被拒; 指向内的放行
   T6 purge 后重保护: 状态干净重建
+  N1/N2 manifest 不泄漏不自包含; N3/N4 多快照+history; N5 指定快照还原;
+  N6 默认还原最近; N7 快照轮转; N8 .tmp 半成品隔离
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -74,7 +76,8 @@ Check '未保护时 restore 被拒 (exit 非 0)' ($r.Code -ne 0)
 # ---------- T2 快照缺失 ----------
 Write-Host "`n[T2] 快照目录缺失时 restore 拒绝执行"
 $null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
-Remove-Item -LiteralPath "$Sandbox\.freeze-snap\current" -Recurse -Force
+Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' |
+  Remove-Item -Recurse -Force
 $r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
 Check 'T2 快照缺失被拒 (exit 非 0)' ($r.Code -ne 0)
 Check 'T2 报错含"快照目录缺失"' ($r.Out -match '快照目录缺失')
@@ -147,6 +150,70 @@ $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
 Check 'T6 重新 protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
 $state = Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw | ConvertFrom-Json
 Check 'T6 state.protected=true 且快照干净' ($state.protected -eq $true -and $state.file_count -eq 3)
+
+# ---------- N1/N2 manifest 自我污染修复 ----------
+Write-Host "`n[N1/N2] 清单移出快照目录: restore 不泄漏, 二次 protect 不自包含"
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+'tampered' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'N1 restore 后源根不含 manifest.json' (-not (Test-Path -LiteralPath "$Sandbox\manifest.json"))
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+$snaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' | Where-Object { $_.Name -notlike '*.tmp' } | Sort-Object Name)
+$latestTs = $snaps[-1].Name -replace '^snap-', ''
+$man = Get-Content -LiteralPath "$Sandbox\.freeze\manifests\$latestTs.json" -Raw | ConvertFrom-Json
+$manPaths = @($man.files | ForEach-Object { $_.path })
+Check 'N2 二次 protect 清单不含 manifest.json' (-not ($manPaths -contains 'manifest.json')) "实际: $($manPaths -join ', ')"
+
+# ---------- N3/N4 多快照与 history ----------
+Write-Host "`n[N3/N4] 连打 3 个快照, history 全部列出"
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')          # 快照1: a=alpha
+'v2' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')          # 快照2: a=v2
+'new-later' | Set-Content -LiteralPath "$Sandbox\d.txt" -Encoding UTF8               # 快照2 之后新增
+'v3' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')          # 快照3: a=v3
+$snapCount = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' | Where-Object { $_.Name -notlike '*.tmp' }).Count
+Check 'N3 protect x3 产生 3 个快照' ($snapCount -eq 3) "实际 $snapCount"
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'N4 history exit 0' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+$tsCount = ([regex]::Matches($r.Out, 'snap-\d{8}-\d{6}')).Count
+Check 'N4 history 输出含 3 个时间戳' ($tsCount -eq 3) "实际 $tsCount"
+
+# ---------- N5 回到指定历史点 ----------
+Write-Host "`n[N5] restore -Snapshot 最旧快照: 回到快照1状态"
+$oldest = ((Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' | Where-Object { $_.Name -notlike '*.tmp' } | Sort-Object Name)[0]).Name -replace '^snap-', ''
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-Snapshot', $oldest, '-AutoConfirm')
+Check 'N5 restore -Snapshot exit 0' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'N5 a.txt 回到最旧快照内容' (((Get-Content -LiteralPath "$Sandbox\a.txt" -Raw).TrimEnd("`r","`n")) -eq 'alpha-content')
+Check 'N5 快照1之后新增的 d.txt 被冰点删除' (-not (Test-Path -LiteralPath "$Sandbox\d.txt"))
+
+# ---------- N6 默认还原到最近 ----------
+Write-Host "`n[N6] 不带 -Snapshot: 还原到最近快照"
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'N6 默认 restore exit 0' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'N6 还原到最近快照内容 (v3)' (((Get-Content -LiteralPath "$Sandbox\a.txt" -Raw).TrimEnd("`r","`n")) -eq 'v3')
+
+# ---------- N7 快照轮转 ----------
+Write-Host "`n[N7] KeepSnapshots=2: 超出按最旧清理"
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-KeepSnapshots', '2', '-AutoConfirm')
+$snapCount = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' | Where-Object { $_.Name -notlike '*.tmp' }).Count
+Check 'N7 轮转后真实快照数 <= 2' ($snapCount -le 2) "实际 $snapCount"
+$manCount = (Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+Check 'N7 清单与快照同步轮转 (manifests <= 2)' ($manCount -le 2) "实际 $manCount"
+
+# ---------- N8 半写快照 (.tmp) 隔离 ----------
+Write-Host "`n[N8] 中断残留 *.tmp 不进 history、不计轮转"
+New-Item -ItemType Directory -Force -Path "$Sandbox\.freeze-snap\snap-20991231-235959.tmp" | Out-Null
+'junk' | Set-Content -LiteralPath "$Sandbox\.freeze-snap\snap-20991231-235959.tmp\junk.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-KeepSnapshots', '2', '-AutoConfirm')
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'N8 history 不列出 .tmp 半成品' (-not ($r.Out -match '20991231')) $r.Out
+$snapCount = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' | Where-Object { $_.Name -notlike '*.tmp' }).Count
+Check 'N8 轮转不把 .tmp 计入 (真实快照 <= 2)' ($snapCount -le 2) "实际 $snapCount"
+$manCount = (Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+Check 'N8 清单数与真实快照一致 (manifests <= 2)' ($manCount -le 2) "实际 $manCount"
 
 # ---------- 清理 ----------
 if (Test-Path -LiteralPath $jlink)  { [System.IO.Directory]::Delete($jlink, $true) }

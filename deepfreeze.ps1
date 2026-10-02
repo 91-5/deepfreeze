@@ -3,28 +3,36 @@
 .SYNOPSIS
   deepfreeze.ps1 — 目录级「重启还原」(DeepFreeze 式) 试点实现
 .DESCRIPTION
-  四个子命令: protect / restore / status / unprotect
+  五个子命令: protect / restore / status / history / unprotect
   安全边界: 默认只允许 D:\15812\ 下的目标目录; 链接(junction/symlink)按真实目标判定, 其他路径需显式 -Force
-  快照布局: <Source>\.freeze-snap\current  (robocopy 镜像, 内含 manifest.json)
+  快照布局: <Source>\.freeze-snap\snap-<yyyyMMdd-HHmmss>\  (每次 protect 新增一个, 不覆盖)
+  清单存放: <Source>\.freeze\manifests\<ts>.json  (集中存放, 不进快照目录 —— 防止 restore 时被 /MIR 拷回源根造成自我污染)
   状态与日志: <Source>\.freeze\state.json, actions.log
-  向导: restore 前自动打 pre-restore 备份(默认保留最近 3 份); restore 后按 manifest 校验哈希
+  向导: restore 前自动打 pre-restore 备份(默认保留最近 3 份); restore 后按 manifest 逐文件校验哈希;
+        protect 后快照按 -KeepSnapshots(默认 5) 轮转
   退出码: 0 = 成功; 非 0 = 失败(脚本内用 throw, 终止性错误; 不再用 exit N 以免杀死调用方 shell)
 .EXAMPLE
   .\deepfreeze.ps1 protect -Source "D:\15812\mo brain\ximo"
   .\deepfreeze.ps1 status   -Source "D:\15812\mo brain\ximo"
+  .\deepfreeze.ps1 history  -Source "D:\15812\mo brain\ximo"
   .\deepfreeze.ps1 restore -Source "D:\15812\mo brain\ximo" -KeepBackups 5
+  .\deepfreeze.ps1 restore -Source "D:\15812\mo brain\ximo" -Snapshot 20261002-150301
   .\deepfreeze.ps1 unprotect -Source "D:\15812\mo brain\ximo"
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('protect', 'restore', 'status', 'unprotect')]
+  [ValidateSet('protect', 'restore', 'status', 'history', 'unprotect')]
   [string]$Action,
 
   [Parameter(Mandatory = $true)]
   [string]$Source,
 
   [int]$KeepBackups = 3,
+  [int]$KeepSnapshots = 5,
+
+  # restore 到指定时间戳的快照(见 history 输出); 不带则还原到最近一个
+  [string]$Snapshot,
 
   [switch]$Purge,
   [switch]$Force,
@@ -92,15 +100,35 @@ function Resolve-SourcePath {  param([string]$PathArg)
 $Source = Resolve-SourcePath -PathArg $Source
 $SnapRoot = Join-Path $Source '.freeze-snap'
 $StateDir = Join-Path $Source '.freeze'
+$ManifestsDir = Join-Path $StateDir 'manifests'
 $StateFile = Join-Path $StateDir 'state.json'
 $LogFile = Join-Path $StateDir 'actions.log'
-$ManifestFile = Join-Path $SnapRoot 'current\manifest.json'
 
 function Get-State {
   if (Test-Path -LiteralPath $StateFile) {
     return Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
   }
   return $null
+}
+
+function Get-Snapshots {
+  # 有效快照 = snap-<ts> 且不带 .tmp 后缀; .tmp 是 protect 中断的半成品, 任何统计都不得计入
+  if (-not (Test-Path -LiteralPath $SnapRoot)) { return @() }
+  return @(Get-ChildItem -LiteralPath $SnapRoot -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike '*.tmp' } | Sort-Object Name)
+}
+
+function Get-SnapshotManifestPath {
+  # 清单集中存放在 .freeze\manifests\<ts>.json, 与快照目录按 ts 一一对应
+  param([string]$Ts)
+  return Join-Path $ManifestsDir "$Ts.json"
+}
+
+function Get-Sha256Hex {
+  # .NET SHA256 实例复用: 354 文件量级下比逐次 Get-FileHash 快约 4 倍 (0.44s -> 0.10s, 实测)
+  param([string]$Path, [System.Security.Cryptography.SHA256]$Sha)
+  $bytes = [System.IO.File]::ReadAllBytes($Path)
+  return [System.BitConverter]::ToString($Sha.ComputeHash($bytes)).Replace('-', '')
 }
 
 function Get-ProtectedFiles {
@@ -116,17 +144,20 @@ function Get-Manifest {
     created = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     files   = @()
   }
-  foreach ($f in $items) {
-    $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
-    $manifest.files += [ordered]@{ path = $rel; size = $f.Length; sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
-  }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    foreach ($f in $items) {
+      $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
+      $manifest.files += [ordered]@{ path = $rel; size = $f.Length; sha256 = (Get-Sha256Hex -Path $f.FullName -Sha $sha) }
+    }
+  } finally { $sha.Dispose() }
   return $manifest
 }
 
 function Get-Diff {
   # 快速差异: 基于文件清单+size (性能优先; 权威判定仍是 restore 后的哈希校验)
-  param([string]$Root)
-  $man = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  param([string]$Root, [string]$ManifestPath)
+  $man = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $manPaths = @{}
   foreach ($m in $man.files) { $manPaths[$m.path] = $m.size }
   $cur = @{}
@@ -166,34 +197,84 @@ function Remove-OldBackups {
   }
 }
 
+function Remove-OldSnapshots {
+  # 快照按时间戳名升序, 最旧的排最前; 超出 $KeepSnapshots 的最旧快照连同其清单一起删
+  $snaps = Get-Snapshots
+  $excess = $snaps.Count - $KeepSnapshots
+  if ($excess -gt 0) {
+    $snaps | Select-Object -First $excess | ForEach-Object {
+      Remove-Item -LiteralPath $_.FullName -Recurse -Force
+      $ts = $_.Name -replace '^snap-', ''
+      Remove-Item -LiteralPath (Get-SnapshotManifestPath -Ts $ts) -Force -ErrorAction SilentlyContinue
+      Write-Log "  清理旧快照: $($_.Name)"
+    }
+  }
+}
+
 switch ($Action) {
 
   'protect' {
     $state = Get-State
-    if ($state -and $state.protected) { throw "已处于保护状态。先 unprotect 或直接 restore。" }
-    New-Item -ItemType Directory -Force -Path $SnapRoot, $StateDir | Out-Null
-    if (-not (Test-Gate -Description "protect: 镜像当前状态到 $SnapRoot\current")) { Write-Host '已取消'; return }
-    Write-Log "protect 开始: $Source"
-    Invoke-RobocopyMirror -Src $Source -Dst (Join-Path $SnapRoot 'current') -Delete
-    $manifest = Get-Manifest -Root $Source
-    ($manifest | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $ManifestFile -Encoding UTF8
+    $appendHint = if ($state -and $state.protected) { ' (已处于保护状态, 追加新快照)' } else { '' }
+    New-Item -ItemType Directory -Force -Path $SnapRoot, $StateDir, $ManifestsDir | Out-Null
+    # 同一秒内连打多个快照会同名冲突: 目标已存在时等时间戳走开
+    $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $snapTarget = Join-Path $SnapRoot "snap-$ts"
+    $tmpDir = "$snapTarget.tmp"
+    while ((Test-Path -LiteralPath $snapTarget) -or (Test-Path -LiteralPath $tmpDir)) {
+      Start-Sleep -Milliseconds 250
+      $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+      $snapTarget = Join-Path $SnapRoot "snap-$ts"
+      $tmpDir = "$snapTarget.tmp"
+    }
+    $manifestPath = Get-SnapshotManifestPath -Ts $ts
+    if (-not (Test-Gate -Description "protect: 镜像当前状态到 $snapTarget$appendHint")) { Write-Host '已取消'; return }
+    Write-Log "protect 开始: $Source (快照 snap-$ts)"
+    # 原子提交: 先写 .tmp 临时目录, 全部成功后同卷 rename —— 快照要么完整存在, 要么不存在,
+    # Ctrl+C/崩溃/磁盘满只会留下一个被各处统计忽略的 .tmp 残骸, 不会污染快照序列
+    try {
+      Invoke-RobocopyMirror -Src $Source -Dst $tmpDir -Delete
+      $manifest = Get-Manifest -Root $Source
+      ($manifest | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+      Move-Item -LiteralPath $tmpDir -Destination $snapTarget
+    }
+    catch {
+      Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+      throw
+    }
     $newState = [ordered]@{
       source = $Source; protected = $true
       snapshot_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+      latest_snapshot = $ts
       file_count = $manifest.files.Count
     }
     ($newState | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding UTF8
-    Write-Log "protect 完成: $($manifest.files.Count) 个文件入快照"
+    Remove-OldSnapshots
+    Write-Log "protect 完成: $($manifest.files.Count) 个文件入快照 snap-$ts"
   }
 
   'restore' {
     $state = Get-State
     if (-not $state -or -not $state.protected) { throw "未处于保护状态, 拒绝 restore (无快照可还原)" }
-    if (-not (Test-Path -LiteralPath (Join-Path $SnapRoot 'current'))) { throw "快照目录缺失: $SnapRoot\current" }
+    # 解析目标快照: 带 -Snapshot 还原到指定时间点; 不带则还原到最近一个
+    if ($Snapshot) {
+      $snapDir = Join-Path $SnapRoot "snap-$Snapshot"
+      if (-not (Test-Path -LiteralPath $snapDir)) { throw "快照不存在: snap-$Snapshot (用 history 查看可用快照)" }
+      $ts = $Snapshot
+    }
+    else {
+      $snaps = Get-Snapshots
+      if ($snaps.Count -eq 0) { throw "快照目录缺失: $SnapRoot 下无任何 snap-* 快照" }
+      $snapDir = $snaps[-1].FullName
+      $ts = $snaps[-1].Name -replace '^snap-', ''
+    }
+    $manifestPath = Get-SnapshotManifestPath -Ts $ts
+    if (-not (Test-Path -LiteralPath $manifestPath)) { throw "快照清单缺失: $manifestPath (快照 snap-$ts 不完整)" }
 
     # diff 预览: 让用户在确认前知情 (REVIEW-001 建议 #5)
-    $diff = Get-Diff -Root $Source
-    $desc = "restore (镜像快照覆盖目标; 将删除 $($diff.New.Count) 个快照后新增文件, 覆盖/恢复 $($diff.Changed.Count + $diff.Missing.Count) 个文件, 快照共 $($diff.Total) 个)"
+    $diff = Get-Diff -Root $Source -ManifestPath $manifestPath
+    $desc = "restore 到 snap-$ts (镜像快照覆盖目标; 将删除 $($diff.New.Count) 个快照后新增文件, 覆盖/恢复 $($diff.Changed.Count + $diff.Missing.Count) 个文件, 快照共 $($diff.Total) 个)"
     Write-Log "diff 预览: 新增 $($diff.New.Count) / 变更 $($diff.Changed.Count) / 缺失 $($diff.Missing.Count) (快照 $($diff.Total) 个)"
     if (-not (Test-Gate -Description "restore: $desc")) { Write-Host '已取消'; return }
 
@@ -203,22 +284,26 @@ switch ($Action) {
     Write-Log "pre-restore 备份完成: $preDir"
 
     # 2) 镜像快照回源 (/MIR: 快照后新增的文件会被删除 —— 冰点的语义)
-    Invoke-RobocopyMirror -Src (Join-Path $SnapRoot 'current') -Dst $Source -Delete
-    Write-Log "restore 镜像完成"
+    Invoke-RobocopyMirror -Src $snapDir -Dst $Source -Delete
+    Write-Log "restore 镜像完成: snap-$ts -> $Source"
 
     # 3) 备份轮转 (REVIEW-001 建议 #4)
     Remove-OldBackups
 
-    # 4) 哈希校验
-    $manifest = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    # 4) 哈希校验: 只遍历 manifest 列出的文件 (不重新枚举整个目录, 顺带绕开 Defender 冷启动)
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $drift = 0
-    foreach ($m in $manifest.files) {
-      $fp = Join-Path $Source $m.path
-      if (-not (Test-Path -LiteralPath $fp)) { Write-Log "  [漂移-缺文件] $($m.path)"; $drift++; continue }
-      try { $h = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash }
-      catch { Write-Log "  [漂移-不可读] $($m.path) (文件被锁?)"; $drift++; continue }
-      if ($h -ne $m.sha256) { Write-Log "  [漂移-内容不符] $($m.path)"; $drift++ }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      foreach ($m in $manifest.files) {
+        $fp = Join-Path $Source $m.path
+        if (-not (Test-Path -LiteralPath $fp)) { Write-Log "  [漂移-缺文件] $($m.path)"; $drift++; continue }
+        try { $h = Get-Sha256Hex -Path $fp -Sha $sha }
+        catch { Write-Log "  [漂移-不可读] $($m.path) (文件被锁?)"; $drift++; continue }
+        if ($h -ne $m.sha256) { Write-Log "  [漂移-内容不符] $($m.path)"; $drift++ }
+      }
     }
+    finally { $sha.Dispose() }
     if ($drift -eq 0) { Write-Log "校验通过: $($manifest.files.Count) 个文件与 manifest 完全一致" }
     else { throw "校验发现 $drift 处漂移, restore 未完全成功 (已保留 pre-restore 备份)。请检查文件占用/权限后重试" }
   }
@@ -226,16 +311,33 @@ switch ($Action) {
   'status' {
     $state = Get-State
     if (-not $state) { Write-Host "未保护: $Source (无 .freeze\state.json)"; return }
-    $snapOk = Test-Path -LiteralPath (Join-Path $SnapRoot 'current')
+    $snaps = Get-Snapshots
+    $snapOk = ($snaps.Count -gt 0)
     Write-Host "目标:   $($state.source)"
     Write-Host "状态:   $(if ($state.protected) { '已保护 (PROTECTED)' } else { '未保护' })"
     Write-Host "快照于: $($state.snapshot_at) ($($state.file_count) 个文件)"
-    Write-Host "快照目录: $(if ($snapOk) { '完好' } else { '缺失!' })"
+    Write-Host "快照:   $(if ($snapOk) { "$($snaps.Count) 个, 最近 $($snaps[-1].Name)" } else { '无 (缺失!)' })"
     # REVIEW-001 建议 #6: restore 前让用户知情
     if ($state.protected -and $snapOk) {
-      $diff = Get-Diff -Root $Source
+      $diff = Get-Diff -Root $Source -ManifestPath (Get-SnapshotManifestPath -Ts ($snaps[-1].Name -replace '^snap-', ''))
       Write-Host "快照后变更: 新增 $($diff.New.Count) 个 / 内容变更 $($diff.Changed.Count) 个 / 被删 $($diff.Missing.Count) 个"
       if ($diff.New.Count -gt 0) { Write-Host "  (restore 将删除这些新增文件: $($diff.New.Count) 个 —— 操作前请确认无未保存内容)" }
+    }
+  }
+
+  'history' {
+    $snaps = Get-Snapshots
+    if ($snaps.Count -eq 0) { Write-Host "无快照: $SnapRoot"; return }
+    Write-Host "快照历史 ($($snaps.Count) 个, 最新在后):"
+    foreach ($s in $snaps) {
+      $ts = $s.Name -replace '^snap-', ''
+      $count = '?'
+      $mp = Get-SnapshotManifestPath -Ts $ts
+      if (Test-Path -LiteralPath $mp) {
+        try { $m = Get-Content -LiteralPath $mp -Raw -Encoding UTF8 | ConvertFrom-Json; $count = @($m.files).Count } catch { }
+      }
+      $mark = if ($s -eq $snaps[-1]) { '  <- 最近' } else { '' }
+      Write-Host "  $($s.Name)  $count 个文件$mark"
     }
   }
 
@@ -245,6 +347,7 @@ switch ($Action) {
     if (-not (Test-Gate -Description 'unprotect' -ActionText 'unprotect')) { Write-Host '已取消'; return }
     if ($Purge) {
       Remove-Item -LiteralPath $SnapRoot -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $ManifestsDir -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
       Write-Log "unprotect + Purge: 快照与状态已删除"
     }
