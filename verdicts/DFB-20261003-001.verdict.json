@@ -14,9 +14,9 @@
     },
     {
       "id": "A2",
-      "description": "verify.ps1 全绿 41 项",
+      "description": "verify.ps1 全绿 39 项",
       "status": "PASS",
-      "evidence": "powershell -NoProfile -File verify.ps1 → 41 PASS, exit 0"
+      "evidence": "powershell -NoProfile -File verify.ps1 → 39 PASS, exit 0"
     },
     {
       "id": "A3",
@@ -80,7 +80,7 @@
     },
     "Q5_PLAN-P0场景覆盖": {
       "answer": "全覆盖",
-      "reasoning": "N1-N8 全部实现，verify.ps1 共 41 项断言（≥ 32 要求）"
+      "reasoning": "N1-N8 全部实现，verify.ps1 共 39 项断言（≥ 32 要求）"
     }
   },
   "constraints_compliance": {
