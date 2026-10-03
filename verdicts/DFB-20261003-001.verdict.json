@@ -1,10 +1,27 @@
 {
+  "id": "DFB-20261003-001",
+  "verdict": "PASS",
+  "overall": "APPROVED",
+  "blockers": 0,
+  "independent": true,
+  "verifier": "Agnes Code",
+  "ts": "2026-10-03T17:00:00+08:00",
+  "evidence": [
+    "A1: git status --porcelain 仅显示本评审卡 A 标记",
+    "A2: powershell -NoProfile -File verify.ps1 → 39 PASS, exit 0",
+    "A3: git show ff04c5e:deepfreeze.ps1 | findstr manifests → 6 行；base → 无输出",
+    "A4: git show ff04c5e:deepfreeze.ps1 | findstr -Snapshot → 13 行；base → 无输出",
+    "A5: git show ff04c5e:deepfreeze.ps1 | findstr KeepSnapshots → 4 行；base → 无输出",
+    "A6: 两版均输出 $AllowedRoot = 'D:\\15812'",
+    "A7: 两版代码完全一致：try { $linkType = $item.LinkType } catch { }",
+    "A8: deepfreeze.ps1 前 3 字节：239 187 191 (EF BB BF)；verify.ps1 同",
+    "A9: 代码审查：测试序列构造正确，断言独立可证伪，前置失败会终止不到达断言"
+  ],
   "task_id": "DFB-20261003-001",
   "commit": "ff04c5ee2201be235dd339b6ee1b7505708be507",
   "baseline": "6d547f544c07caf35a3b6a1e977dbd22ca8fa865",
   "reviewer": "Agnes Code",
   "review_date": "2026-10-03",
-  "verdict": "APPROVED",
   "conclusions": [
     {
       "id": "A1",
@@ -90,6 +107,5 @@
     "C4_纯PS5.1": "PASS - 无新增依赖",
     "C5_BOM": "PASS - 两个 .ps1 均为 UTF-8 with BOM",
     "C6_restore边界": "PASS - /MIR 源恒为快照目录"
-  },
-  "overall": "APPROVED"
+  }
 }
