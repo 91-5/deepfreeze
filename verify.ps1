@@ -22,7 +22,7 @@ $Script = Join-Path $Root 'deepfreeze.ps1'
 # 顺带让 DEEPFREEZE_ALLOWED_ROOT 这条配置路径每次自检都被真实走到。
 $env:DEEPFREEZE_ALLOWED_ROOT = $Root
 $Sandbox = Join-Path $Root '_selftest\data'
-$Outside = Join-Path ([System.IO.Path]::GetTempPath()) 'deepfreeze-t5-outside'  # 必须在 D:\15812\ 之外(系统 TEMP 在 C 盘)
+$Outside = Join-Path ([System.IO.Path]::GetTempPath()) 'deepfreeze-t5-outside'  # 必须在 $AllowedRoot(= $Root) 之外; 系统 TEMP 在 C 盘, 天然在仓库外
 
 $failures = @()
 function Check {
