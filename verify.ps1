@@ -17,6 +17,10 @@
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Script = Join-Path $Root 'deepfreeze.ps1'
+# 让自检与仓库所在位置解耦: 沙箱就在 $Root 下, 所以把安全边界钉到 $Root。
+# 比用户自己配置的边界更窄(只覆盖本仓库), 只会更安全; 且仅作用于本进程与子进程。
+# 顺带让 DEEPFREEZE_ALLOWED_ROOT 这条配置路径每次自检都被真实走到。
+$env:DEEPFREEZE_ALLOWED_ROOT = $Root
 $Sandbox = Join-Path $Root '_selftest\data'
 $Outside = Join-Path ([System.IO.Path]::GetTempPath()) 'deepfreeze-t5-outside'  # 必须在 D:\15812\ 之外(系统 TEMP 在 C 盘)
 
