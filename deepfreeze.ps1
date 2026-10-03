@@ -4,7 +4,10 @@
   deepfreeze.ps1 — 目录级「重启还原」(DeepFreeze 式) 试点实现
 .DESCRIPTION
   五个子命令: protect / restore / status / history / unprotect
-  安全边界: 默认只允许 D:\15812\ 下的目标目录; 链接(junction/symlink)按真实目标判定, 其他路径需显式 -Force
+  安全边界: 只允许 $AllowedRoot 下的目标目录。边界解析顺序 = 显式 -AllowedRoot → 环境变量
+             DEEPFREEZE_ALLOWED_ROOT → 默认 'D:\15812'（仅当该路径确实存在时）; 三者都拿不到
+             则拒绝启动（fail-closed, 不猜宽边界兜底）。
+             链接(junction/symlink)按真实目标判定, 其他路径需显式 -Force
   快照布局: <Source>\.freeze-snap\snap-<yyyyMMdd-HHmmss>\  (每次 protect 新增一个, 不覆盖)
   清单存放: <Source>\.freeze\manifests\<ts>.json  (集中存放, 不进快照目录 —— 防止 restore 时被 /MIR 拷回源根造成自我污染)
   状态与日志: <Source>\.freeze\state.json, actions.log
@@ -18,6 +21,9 @@
   .\deepfreeze.ps1 restore -Source "D:\15812\mo brain\ximo" -KeepBackups 5
   .\deepfreeze.ps1 restore -Source "D:\15812\mo brain\ximo" -Snapshot 20261002-150301
   .\deepfreeze.ps1 unprotect -Source "D:\15812\mo brain\ximo"
+.EXAMPLE
+  换机器/换用户时显式指定安全边界（或预先设 $env:DEEPFREEZE_ALLOWED_ROOT）
+  .\deepfreeze.ps1 protect -Source "E:\work\proj" -AllowedRoot "E:\work"
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -34,6 +40,9 @@ param(
   # restore 到指定时间戳的快照(见 history 输出); 不带则还原到最近一个
   [string]$Snapshot,
 
+  # 安全边界根目录; 不带则依次取环境变量 DEEPFREEZE_ALLOWED_ROOT、默认 'D:\15812'
+  [string]$AllowedRoot,
+
   [switch]$Purge,
   [switch]$Force,
 
@@ -41,7 +50,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$AllowedRoot = 'D:\15812'
+
+# 安全边界解析。刻意 fail-closed: 拿不到边界就拒绝启动, 不猜一个宽边界兜底——
+# 边界配置错了应该「拒绝服务」, 而不是「默默放开到整盘」。
+if (-not $AllowedRoot) {
+  if ($env:DEEPFREEZE_ALLOWED_ROOT) {
+    $AllowedRoot = $env:DEEPFREEZE_ALLOWED_ROOT
+  } elseif (Test-Path -LiteralPath 'D:\15812') {
+    $AllowedRoot = 'D:\15812'
+  } else {
+    throw '未指定安全边界, 已拒绝启动。请显式传入 -AllowedRoot <根目录>, 或设置环境变量 DEEPFREEZE_ALLOWED_ROOT。（不提供默认宽边界是刻意的: 边界宁严勿宽）'
+  }
+}
+if (-not (Test-Path -LiteralPath $AllowedRoot -PathType Container)) {
+  throw "安全边界根目录不存在或不是目录: '$AllowedRoot'（请检查 -AllowedRoot / DEEPFREEZE_ALLOWED_ROOT）"
+}
+# 归一化尾部反斜杠: 环境变量很容易写成 'D:\15812\', 而 Test-WithinAllowed
+# 拼的是 "$AllowedRoot\", 双斜杠会让 StartsWith 永远失配
+$AllowedRoot = $AllowedRoot.TrimEnd('\')
 
 function Write-Log {
   param([string]$Message)

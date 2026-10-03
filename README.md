@@ -52,7 +52,8 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 
 | 机制 | 说明 |
 |---|---|
-| 路径边界 | 默认仅允许 `D:\15812\` 下目标；**链接（junction/symlink）按真实目标判定**，指向界外一律拒绝 |
+| 路径边界 | 仅允许 `$AllowedRoot` 下目标；**链接（junction/symlink）按真实目标判定**，指向界外一律拒绝 |
+| 边界配置 | 解析顺序：`-AllowedRoot` → 环境变量 `DEEPFREEZE_ALLOWED_ROOT` → 默认 `D:\15812\`（仅当该路径存在时）。三者都拿不到则**拒绝启动**——刻意 fail-closed，不猜一个宽边界兜底。换机器/换用户请显式配置 |
 | 越界双确认 | 越界路径除 `-Force` 外还需 ShouldContinue 二次确认 |
 | 还原前备份 | restore 前自动打 `prerestore-<时间戳>`，默认保留最近 3 份（`-KeepBackups` 可调） |
 | 快照原子性 | protect 先写 `*.tmp` 临时目录，全部成功后同卷 rename 提交；半成品不进 history、不计轮转 |
@@ -66,7 +67,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 .\verify.ps1
 # 核心 正/负路径 + T1锁文件 / T2快照缺失 / T3备份轮转 / T4 Unicode名 / T5 junction穿透 / T6 purge重保护
 # + N1清单不泄漏 / N2清单不自包含 / N3多快照 / N4 history / N5指定快照还原 / N6默认还原最近 / N7快照轮转 / N8 .tmp隔离
-# PASS = exit 0（当前 41 项断言）
+# PASS = exit 0（当前 39 项断言）
 ```
 
 ## 已知边界（这能做什么 / 不能做什么，请如实理解）

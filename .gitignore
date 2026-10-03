@@ -1,1 +1,7 @@
 _selftest/
+
+# Review-process artifacts: local only, never published to the public repo.
+# Cards / reviewer verdicts contain local absolute paths and internal
+# process notes, so they stay on this machine.
+.tasks/
+verdicts/
