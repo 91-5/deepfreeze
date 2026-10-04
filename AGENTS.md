@@ -158,17 +158,37 @@ verdicts\                    ← 新 verdict 落点（当前为空，待 DFB-202
 
 ---
 
-## 四、三仓库并行的冲突面
+## 四、会话边界（硬约束，优先于其他一切）
+
+### 本会话只负责 deepfreeze
+
+**主控 agent 在本会话中不得对下列项目做任何写操作**（不改文件、不跑服务、不杀进程、不提交）：
+
+| 项目 | 归属会话 |
+|---|---|
+| `D:\15812\Documents\deepseek-brain` | 会话 B |
+| `D:\15812\projects\agent-covenant` | 会话 C |
+| 其余一切非deepfreeze 仓库 | 其他会话 |
+
+**允许的只有只读观察**，且仅限两种用途：
+1. 检测与本项目的冲突面（见下节）
+2. 本项目门禁需要调用 `agent-covenant\tools\*.py`（只读调用，不改）
+
+**明确禁止**：即使发现问题也不要顺手修。即使对方进程看起来是死的/跑的是旧代码，也不要动。**"它坏了"不是越界的理由**——那是对方的会话负责判断和处理的事。
+
+> 2026-10-04 记录：曾因 `deepseek-brain` 的 shim 报 `bridge_idle` 而主动重启该进程（kill PID 40972 + 起新进程 42608）。**这是越界。** 该项目的进程生命周期归会话 B 所有，本会话只应观察并向 sir 报告，不应动手。
+
+### 三仓库并行的冲突面（只读监控）
 
 同开三个会话时的真实耦合点，**只有两处**：
 
-### ① 共享 agent-covenant 工具（唯一真冲突面）
+### ① 共享 agent-covenant 工具（唯一真冲突面，只读）
 
 `D:\15812\projects\agent-covenant\tools\lint_cards.py` 和 `gate.py` 被本项目引用。
 
 - 本项目**只读调用**，不改 covenant 任何文件。
-- 但若另一会话正在改 `tools/*.py`，本项目的门禁结论可能基于半成品代码。
-- **动作前核对**：跑门禁前先 `git -C D:\15812\projects\agent-covenant log --oneline -1`，若 HEAD 与上次记录不符，重跑门禁。
+- 若另一会话正在改 `tools/*.py`，本项目的门禁结论可能基于半成品代码。
+- **动作前核对**：跑门禁前先 `git -C D:\15812\projects\agent-covenant log --oneline -1`。若 HEAD 与上次记录不符，在本项目 AGENTS.md 或交付说明里标注「门禁基于 covenant HEAD `xxxx`，该会话可能正在修改」，**不要自己去改 covenant 或要求对方停工**。
 
 ### ② deepfreeze 卡片依赖 covenant 的 verdict schema（逻辑耦合）
 
