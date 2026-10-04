@@ -120,33 +120,41 @@ python D:\15812\projects\agent-covenant\tools\lint_cards.py --dir .tasks --verdi
 
 ---
 
-## 三、已知遗留问题（2026-10-04 核实）
+## 三、遗留问题与当前状态（2026-10-04 核实）
 
-### P1 · 卡片生命周期烂账
+### ✅ 已解决
 
-7 张卡 5 种终态并存，无一归档，`.tasks/archive/` 目录**根本不存在**。
+| 项 | 处置 |
+|---|---|
+| `C:\.freeze-snap` junction → `D:\deepfreeze-snap` | 已删（链接 + 目标），滚雪球隐患消除 |
+| `C:\.freeze` / `D:\15812\.freeze` 残骸 | 已删（两次中断的 protect 现场，证据已留档） |
+| 7 张卡 5 种终态并存 | 已全部物理移入 `.tasks/archive/`（含 2 份配套 verdict） |
+| `PROBE-README.md`（Ximo 时代死文件） | 已删 |
+| `Desktop\.freeze-snap` / `D:\15812\.freeze-snap` 空壳 | 已删 |
+| `AGENTS.md` 本文件 | 已建 |
 
-| 卡 | 状态 | 待处理 |
+commit：`fd24c26`。lint 从 **8 warnings → 1 warning**（仅剩 OPEN 卡无 verdict，属正常）。
+
+### 目录布局约定（改动后）
+
+```
+.tasks\                      ← 活跃卡（lint 的 --dir 指向这里）
+  DFB-<date>-<seq>.md
+  archive\                   ← 已归档卡 + 各自 verdict（不再参与活跃 lint）
+verdicts\                    ← 新 verdict 落点（当前为空，待 DFB-20261004-001）
+```
+
+**注意**：那 8 个卡在 `.gitignore` 规则生效前就已被 commit，所以 ignore 规则对它们无效。`fd24c26` 提交其删除后才真正 untrack——这实现了 `.gitignore:3` 注释写明的原意。`archive/` 下的副本被 ignore，本地完整保留。
+
+### ⚠️ linter 已知缺口（属 agent-covenant 会话，非本项目）
+
+`lint_cards.py` 没有「归档目录」概念：对 `.tasks\archive\` 跑 lint 会对已归档的 CLOSED/GATED 卡照样报 `CLOSED_NOT_ARCHIVED`。**所以 lint 只能对 `.tasks\` 跑，`archive\` 不跑。** 若要根治需 covenant 侧加 `--archive-dir`，已记录待会话 C 处理——**本项目不得改 covenant**。
+
+### 进行中
+
+| 卡 | 状态 | 内容 |
 |---|---|---|
-| DFB-001 | `CLOSED` | 超期未归档（PROTOCOL §8 要求 1 个工作日内） |
-| DFB-002 | `REVIEW-REQUESTED` | verdict 已在库，卡状态未同步；A4 fail-closed 未实测 |
-| DFB-003 | `RETURNED-TO-REVIEWER` | 实际已被 DFB-007 取代，未销账 |
-| DFB-004 | `RETURNED-TO-REVIEWER` | 同上 |
-| DFB-005 | `RETURNED-TO-REVIEWER` | 同上 |
-| DFB-006 | `RETIRED-FACTUAL-ERROR` | 已作废，仍占位 |
-| DFB-007 | `GATED` | 超期未归档 + 缺 Review questions 段 |
-
-这 8 条对应 lint 的 8 个 warning（`CLOSED_NOT_ARCHIVED` ×2、`VERDICT_WITHOUT_REVIEW` ×5、`TASK_MISSING_REVIEW_QUESTIONS` ×1）。
-
-> ⚠️ `.tasks/` 已 gitignore，**归档= 物理移到 `.tasks/archive/`，git 里删了不可恢复**。动手前先决定保留策略。
-
-### P2 · 死文件
-
-`PROBE-README.md` — Ximo v1.3.0 时代的沙箱读权限探针，指向已删除的 `D:\15812\mo brain\ximo\`。纯死文件。
-
-### P3 · 空壳目录
-
-`C:\Users\15812\Desktop\.freeze-snap` 和 `D:\15812\.freeze-snap` 均 0 条目。无害，但可考虑清理。
+| `DFB-20261004-001` | `OPEN` | protect 规模护栏，ZCode 实现中 → AgnesCode 评审 |
 
 ---
 
