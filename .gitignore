@@ -5,3 +5,9 @@ _selftest/
 # process notes, so they stay on this machine.
 .tasks/
 verdicts/
+
+# deepfreeze 的运行时产物: 本仓库自己 protect 时生成的快照与状态目录。
+# 快照里含 .git/ 与全部工作副本, 体积大且是本机状态, 绝不入库。
+# (评审 C1, DFB-20261004-001)
+.freeze/
+.freeze-snap/
