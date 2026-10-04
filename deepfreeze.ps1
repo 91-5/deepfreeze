@@ -196,7 +196,8 @@ function Test-SourceScale {
       $reason = "文件数 $count 超过阈值 $FileCountLimit"
     }
     elseif ($bytes -gt $ByteLimit) {
-      $reason = "总字节数 $bytes ({0:N1} MB) 超过阈值 $ByteLimit (500 MB)" -f ($bytes / 1MB)
+      # 措辞防歧义(返工单 C2): 原始字节与阈值不并排裸印, 阈值从常量换算, 改常量时消息自动一致
+      $reason = '总字节数 {0}（约 {1:N1} MB）超过 {2:N0} MB 阈值' -f $bytes, ($bytes / 1MB), ($ByteLimit / 1MB)
     }
   }
   if (-not $reason) { return }
@@ -429,7 +430,9 @@ switch ($Action) {
       Remove-Item -LiteralPath $SnapRoot -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $ManifestsDir -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
-      Write-Log "unprotect + Purge: 快照与状态已删除"
+      # 措辞对齐实际行为(返工单 C3): -Purge 删快照/清单/状态, 但 actions.log 审计日志保留
+      # (与本项目「事故可追溯」基调一致, 删审计日志比留它更糟), 故明说保留而非宣称全删
+      Write-Log "unprotect + Purge: 快照与状态已删除 (actions.log 审计日志保留)"
     }
     else {
       $state.protected = $false

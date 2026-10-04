@@ -223,10 +223,16 @@ Check 'N8 清单数与真实快照一致 (manifests <= 2)' ($manCount -le 2) "�
 
 # ---------- G1~G6 规模护栏 (DFB-20261004-001, 追加于 39 项基线之后, 未改动任何基线断言) ----------
 Write-Host "`n[G1] 源=安全边界根本身: 拒绝且零副作用"
+# 零写入用前后计数对比断言: 仓库可能本来就有历史快照, Test-Path 探测法区分不了
+# 「本次没写」与「本来就有」(返工单 B1)。必须先 Test-Path 再计数——对不存在路径
+# 用 Get-ChildItem -Recurse 会把末段当通配符递归匹配到别处 (任务卡 A3 原始缺陷)
+$gSnapDir = Join-Path $Root '.freeze-snap'
+$gBefore = if (Test-Path $gSnapDir) { @(Get-ChildItem $gSnapDir -Directory -Filter 'snap-*').Count } else { 0 }
 $r = Invoke-Deepfreeze @('protect', '-Source', $Root, '-AutoConfirm')
+$gAfter = if (Test-Path $gSnapDir) { @(Get-ChildItem $gSnapDir -Directory -Filter 'snap-*').Count } else { 0 }
 Check 'G1 边界根被拒 (exit 非 0, -AutoConfirm 下依然拒绝)' ($r.Code -ne 0) "exit=$($r.Code)"
 Check 'G1 报错含规模护栏说明' ($r.Out -match '规模护栏')
-Check 'G1 拒绝时未创建任何快照目录' (-not (Test-Path "$Root\.freeze-snap\snap-*"))
+Check 'G1 拒绝时快照数未增加 (零写入)' ($gAfter -eq $gBefore) "before=$gBefore after=$gAfter"
 
 Write-Host "`n[G2] 源=盘根 (-Force 越过路径边界后): 仍被规模护栏拒绝"
 $drive = Split-Path -Qualifier $Root
