@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。39 项断言（N1~N8 + T1~T6）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**52 项断言**（39 项基线 N1~N8 + T1~T6，另 + 13 项 G 系规模护栏）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -18,13 +18,21 @@
 ## 当前基线（2026-10-04 核实）
 
 ```
-HEAD      79153bc  docs(review): close DFB-007 (GATED)
+HEAD      786a82d  fix(verify): make G1 zero-write assertion env-independent
+          ↑ 与 origin/main 同步，工作区干净
 git status 干净
-verify.ps1  39/39 PASS  EXITCODE=0
-lint_cards  PASS (8 warnings, 0 errors)  ← 8 个 warning 全是卡片生命周期问题，见下
+verify.ps1  52/52 PASS  EXITCODE=0
+lint_cards  PASS (0 warnings)
+gate.py     PASS（注意：freshness 未检查，本项目无 artifacts.json，见下）
 ```
 
 三仓库并行开发时的冲突面见文末。
+
+### ⚠️ 已知盲区：verdict 新鲜度未检查
+
+`gate.py` 输出 `[NOTICE] freshness NOT checked - no entry in the artifact map` —— 本项目**没有 `artifacts.json`**，因此「verdict 是否比它judge的东西更新」这条规则**未启用**，verdict 失效不会被自动拦住。
+
+要根治需建 `artifacts.json` 声明每个 verdict 覆盖哪些文件（并用 `--artifact-map` 传入）。**属新工作，尚未排期。** 在此之前，门禁新鲜度靠人工核 HEAD。
 
 ---
 
@@ -143,10 +151,12 @@ commit：`fd24c26`。lint 从 **8 warnings → 1 warning**（仅剩 OPEN 卡无 
 .tasks\                      ← 活跃卡（lint 的 --dir 指向这里）
   DFB-<date>-<seq>.md
   archive\                   ← 已归档卡 + 各自 verdict（不再参与活跃 lint）
-verdicts\                    ← 新 verdict 落点（当前为空，待 DFB-20261004-001）
+verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 ```
 
-**注意**：那 8 个卡在 `.gitignore` 规则生效前就已被 commit，所以 ignore 规则对它们无效。`fd24c26` 提交其删除后才真正 untrack——这实现了 `.gitignore:3` 注释写明的原意。`archive/` 下的副本被 ignore，本地完整保留。
+**注意**：那 8 个 20261003 卡在 `.gitignore` 规则生效前就已被 commit，所以 ignore 规则对它们无效。`fd24c26` 提交其删除后才真正 untrack——这实现了 `.gitignore:3` 注释写明的原意。`archive/` 下的副本被 ignore，本地完整保留。
+
+**归档约定**：卡进入 `GATED`/`CLOSED` 后 1 个工作日内，卡与配套 verdict **成对移入 `.tasks\archive\`**。已归档 11 项（8 张 20261003 卡 + REVIEW 单 + 2 份 verdict + `DFB-20261004-001` 卡与 verdict）。
 
 ### ⚠️ linter 已知缺口（属 agent-covenant 会话，非本项目）
 
@@ -154,9 +164,17 @@ verdicts\                    ← 新 verdict 落点（当前为空，待 DFB-202
 
 ### 进行中
 
-| 卡 | 状态 | 内容 |
+无。`.tasks\` 活跃区为空。
+
+**最近完成**：`DFB-20261004-001`（protect 规模护栏）— 2026-10-04 全流程闭环，verdict `PASS`（round 2，0 blocker + 0 condition），已 push 至 `origin/main`（`786a82d`）。
+
+### 留作后续 EVO 的开放项
+
+| 维度 | 内容 | 出处 |
 |---|---|---|
-| `DFB-20261004-001` | `OPEN` | protect 规模护栏，ZCode 实现中 → AgnesCode 评审 |
+| 排除语义统一 | `Get-ProtectedFiles` 用 `-notlike "$Root\.freeze\*"`（**前缀**匹配）vs robocopy `/XD`（**路径精确**排除）。理论分叉仅在 `.freezeX` 这类恰好前缀命中的目录名，实际场景不存在 | 评审维度 5 |
+| verify 降本 | `verify.ps1` 每次跑写 5001 文件 + ~525MB，墙钟 **~72s**，相对秒级基线是数量级退化。判定可接受，建议改稀疏文件/不落盘构造 | 评审维度 6 |
+| verdict 新鲜度 | 本项目无 `artifacts.json`，gate 的 staleness 规则未启用（见「当前基线」下的盲区说明） | 本轮 |
 
 ---
 
