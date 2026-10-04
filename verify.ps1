@@ -25,8 +25,10 @@ $Sandbox = Join-Path $Root '_selftest\data'
 $Outside = Join-Path ([System.IO.Path]::GetTempPath()) 'deepfreeze-t5-outside'  # 必须在 $AllowedRoot(= $Root) 之外; 系统 TEMP 在 C 盘, 天然在仓库外
 
 $failures = @()
+$checkCount = 0
 function Check {
   param([string]$Name, [bool]$Ok, [string]$Detail = '')
+  $script:checkCount++
   if ($Ok) { Write-Host "  [PASS] $Name" }
   else { Write-Host "  [FAIL] $Name $Detail"; $script:failures += $Name }
 }
@@ -219,13 +221,59 @@ Check 'N8 轮转不把 .tmp 计入 (真实快照 <= 2)' ($snapCount -le 2) "实�
 $manCount = (Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
 Check 'N8 清单数与真实快照一致 (manifests <= 2)' ($manCount -le 2) "实际 $manCount"
 
+# ---------- G1~G6 规模护栏 (DFB-20261004-001, 追加于 39 项基线之后, 未改动任何基线断言) ----------
+Write-Host "`n[G1] 源=安全边界根本身: 拒绝且零副作用"
+$r = Invoke-Deepfreeze @('protect', '-Source', $Root, '-AutoConfirm')
+Check 'G1 边界根被拒 (exit 非 0, -AutoConfirm 下依然拒绝)' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'G1 报错含规模护栏说明' ($r.Out -match '规模护栏')
+Check 'G1 拒绝时未创建任何快照目录' (-not (Test-Path "$Root\.freeze-snap\snap-*"))
+
+Write-Host "`n[G2] 源=盘根 (-Force 越过路径边界后): 仍被规模护栏拒绝"
+$drive = Split-Path -Qualifier $Root
+$r = Invoke-Deepfreeze @('protect', '-Source', "$drive\", '-AllowedRoot', $Root, '-Force', '-AutoConfirm')
+Check 'G2 盘根被拒 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'G2 报错指明盘根' ($r.Out -match '盘根')
+
+Write-Host "`n[G3] 超文件数阈值 (5001 个文件 > 5000): 拒绝"
+$gBig = Join-Path $Root '_selftest\guard-big'
+if (Test-Path -LiteralPath $gBig) { Remove-Item -LiteralPath $gBig -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $gBig | Out-Null
+1..5001 | ForEach-Object { Set-Content -LiteralPath (Join-Path $gBig "f$_.txt") -Value 'x' -Encoding ASCII }
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-AutoConfirm')
+Check 'G3 超文件数阈值被拒 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'G3 报错含文件数阈值说明' ($r.Out -match '文件数')
+Check 'G3 未产生快照 (只有被拒现场, 无 snap-*)' (-not (Test-Path "$gBig\.freeze-snap\snap-*"))
+
+Write-Host "`n[G4] 超字节阈值 (501 个 1MB 文件 = 525MB > 500MB, 文件数在阈值内): 拒绝"
+$gBytes = Join-Path $Root '_selftest\guard-bytes'
+if (Test-Path -LiteralPath $gBytes) { Remove-Item -LiteralPath $gBytes -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $gBytes | Out-Null
+$mbBuf = New-Object byte[] (1MB)
+1..501 | ForEach-Object { [System.IO.File]::WriteAllBytes((Join-Path $gBytes "b$_.bin"), $mbBuf) }
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBytes, '-AutoConfirm')
+Check 'G4 超字节阈值被拒 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'G4 报错含字节阈值说明' ($r.Out -match '总字节数|字节数')
+
+Write-Host "`n[G5] -ForceLarge 逃生开关: 放行且 actions.log 留痕"
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-ForceLarge', '-AutoConfirm')
+Check 'G5 -ForceLarge 对超阈目录放行 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+$gLog = Get-Content -LiteralPath "$gBig\.freeze\actions.log" -Raw -ErrorAction SilentlyContinue
+Check 'G5 actions.log 含护栏越过记录' ($null -ne $gLog -and $gLog -match 'ForceLarge')
+
+Write-Host "`n[G6] 正常规模目录不受护栏影响 (回归保护)"
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'G6 正常目录 protect 成功 (exit 0, 未被误杀)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+
 # ---------- 清理 ----------
 if (Test-Path -LiteralPath $jlink)  { [System.IO.Directory]::Delete($jlink, $true) }
 if (Test-Path -LiteralPath $jlink2) { [System.IO.Directory]::Delete($jlink2, $true) }
+Remove-Item -LiteralPath $gBig   -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $gBytes -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path -LiteralPath "$Sandbox\.freeze") { $null = Invoke-Deepfreeze @('unprotect', '-Source', $Sandbox, '-Purge', '-AutoConfirm') }
 Remove-Item -LiteralPath $Sandbox -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $Outside -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
-if ($failures.Count -eq 0) { Write-Host '结果: PASS'; exit 0 }
-else { Write-Host "结果: FAIL ($($failures.Count) 项): $($failures -join ' | ')"; exit 1 }
+if ($failures.Count -eq 0) { Write-Host "结果: PASS ($checkCount 项断言)"; exit 0 }
+else { Write-Host "结果: FAIL ($($failures.Count)/$checkCount 项): $($failures -join ' | ')"; exit 1 }

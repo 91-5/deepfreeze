@@ -64,6 +64,8 @@ lint_cards  PASS (8 warnings, 0 errors)  ← 8 个 warning 全是卡片生命周
 
 **判断标准**：预计产出 > 500 MB 或 > 5,000 文件 → **先想清楚，别跑**。
 
+> 以上禁止已由 `deepfreeze.ps1` 的规模护栏（`Test-SourceScale`）强制执行：源=边界根/盘根、文件数 > 5000 或字节 > 500 MB 时 `protect` 直接拒绝，`-AutoConfirm` 不能绕过；确需硬闯须显式 `-ForceLarge`，且会记入 `actions.log`（DFB-20261004-001）。
+
 ### 🚫 禁止手工创建 `.freeze` / `.freeze-snap` 在边界外
 
 `.freeze-snap` 的位置由 `deepfreeze.ps1:127` 从 `-Source` 推导，**不要**手工把快照库放到 `-Source` 之外再 junction 回去。

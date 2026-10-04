@@ -53,6 +53,11 @@ $env:DEEPFREEZE_ALLOWED_ROOT = "C:\你的项目根"
 .\deepfreeze.ps1 unprotect -Source "<你的目录>"
 ```
 
+> **规模护栏**：`protect` 会在写入前做规模预检——源目录是**安全边界根本身**或**盘根**、
+> 或实测**文件数 > 5000** / **总字节数 > 500 MB** 时直接拒绝（`-AutoConfirm` 也不能绕过）。
+> 唯一逃生通道是显式 `-ForceLarge`，硬闯会写 `Write-Warning` 并记入 `actions.log` 可追溯。
+> 该护栏是 fail-closed 设计：拒绝时源目录零副作用（不建任何目录）。
+
 > 上面示例用 `<你的目录>` 占位。边界默认值 `D:\15812\` 是**作者本机路径**，
 > 在别的机器上通常不存在，此时必须按第 0 步显式配置。
 
@@ -81,6 +86,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 | 机制 | 说明 |
 |---|---|
 | 路径边界 | 仅允许 `$AllowedRoot` 下目标；**链接（junction/symlink）按真实目标判定**，指向界外一律拒绝 |
+| 规模护栏 | `protect` 前置规模预检：源=边界根/盘根、文件数 > 5000 或总字节 > 500 MB 一律 **throw 拒绝**（fail-closed），`-AutoConfirm` 不能绕过（2026-10-03 两次整盘事故的触发路径就是 `-AutoConfirm`）；唯一逃生通道 `-ForceLarge`，硬闯记入 `actions.log`。阈值只定义在 `deepfreeze.ps1` 的 `Test-SourceScale` 一处 |
 | 边界配置 | 解析顺序：`-AllowedRoot` → 环境变量 `DEEPFREEZE_ALLOWED_ROOT` → 默认 `D:\15812\`（仅当该路径存在时）。三者都拿不到则**拒绝启动**——刻意 fail-closed，不猜一个宽边界兜底。换机器/换用户请显式配置 |
 | 越界双确认 | 越界路径除 `-Force` 外还需 ShouldContinue 二次确认 |
 | 还原前备份 | restore 前自动打 `prerestore-<时间戳>`，默认保留最近 3 份（`-KeepBackups` 可调） |
@@ -95,7 +101,8 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 .\verify.ps1
 # 核心 正/负路径 + T1锁文件 / T2快照缺失 / T3备份轮转 / T4 Unicode名 / T5 junction穿透 / T6 purge重保护
 # + N1清单不泄漏 / N2清单不自包含 / N3多快照 / N4 history / N5指定快照还原 / N6默认还原最近 / N7快照轮转 / N8 .tmp隔离
-# PASS = exit 0（当前 39 项断言）
+# + G1~G6 规模护栏（边界根/盘根/超文件数/超字节被拒、-ForceLarge 逃生留痕、正常目录不误杀）
+# PASS = exit 0（当前 52 项断言：39 项基线 + 13 项 G 系规模护栏断言）
 ```
 
 ## 已知边界（这能做什么 / 不能做什么，请如实理解）
@@ -132,6 +139,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 
 - 保护对象是**普通数据目录**；`/MIR` 会删目标里快照后新增的文件——这是特性不是 bug，但被保护目录别当垃圾场
 - `prerestore-*` 备份与快照是两套东西：快照是「回到某个时间点」，prerestore 是「还原出错时退回还原前」，语义不同，不合并
+- 规模护栏挡的是「合法但危险」的调用（整盘/边界级 protect），不挡正常项目目录；`-ForceLarge` 是给「我就是知道它很大、我就是要保护」的场景留的显式出口，不是常规参数
 
 ## 文件
 

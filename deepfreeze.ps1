@@ -8,6 +8,8 @@
              DEEPFREEZE_ALLOWED_ROOT → 默认 'D:\15812'（仅当该路径确实存在时）; 三者都拿不到
              则拒绝启动（fail-closed, 不猜宽边界兜底）。
              链接(junction/symlink)按真实目标判定, 其他路径需显式 -Force
+             规模护栏: protect 前置检查, 源=安全边界根/盘根/文件数>5000/字节数>500MB 一律拒绝
+             (fail-closed), -AutoConfirm 不能绕过; 唯一逃生通道 -ForceLarge, 硬闯记入 actions.log
   快照布局: <Source>\.freeze-snap\snap-<yyyyMMdd-HHmmss>\  (每次 protect 新增一个, 不覆盖)
   清单存放: <Source>\.freeze\manifests\<ts>.json  (集中存放, 不进快照目录 —— 防止 restore 时被 /MIR 拷回源根造成自我污染)
   状态与日志: <Source>\.freeze\state.json, actions.log
@@ -45,6 +47,10 @@ param(
 
   [switch]$Purge,
   [switch]$Force,
+
+  # 规模护栏(DFB-20261004-001)的显式逃生通道: 对边界根/盘根/超大规模目录仍要 protect 时使用。
+  # 与 -Force(越安全边界)语义不同、分开计, 硬闯会 Write-Warning 并记入 actions.log 可追溯
+  [switch]$ForceLarge,
 
   [switch]$AutoConfirm
 )
@@ -163,6 +169,52 @@ function Get-ProtectedFiles {
     Where-Object { $_.FullName -notlike "$Root\.freeze\*" -and $_.FullName -notlike "$Root\.freeze-snap\*" }
 }
 
+function Test-SourceScale {
+  # 规模护栏 (DFB-20261004-001): 拦截整盘/边界级 protect。
+  # 2026-10-03 两次事故 (C:\ 31.42GB/114,012 文件 与 D:\15812) 都是带 -AutoConfirm 的
+  # 「合法调用」——Test-Gate 在 -AutoConfirm 下直接放行, 拦不住, 所以规模防线必须
+  # 独立于确认门禁生效, 且对 -AutoConfirm 依然拒绝 (fail-closed)。
+  # 排除语义直接复用 Get-ProtectedFiles (与 robocopy /XD 同一套), 不引入第三套排除规则。
+  # 边界根/盘根是结构性拒绝, 不做枚举直接 fail-fast —— 对 C:\ 这类目标, 枚举本身
+  # 就是事故的一部分。阈值调整只改本函数内两个常量。
+  param([string]$Root)
+  $FileCountLimit = 5000
+  $ByteLimit = 500MB
+  $reason = $null
+  if ($Root -ieq $AllowedRoot) {
+    $reason = "源目录就是安全边界本身 ($AllowedRoot)。边界内任何目录都可保护, 但边界根本身通常聚合了全部数据 (实测 D:\15812 = 33.9GB/33,777 文件)"
+  }
+  elseif ($Root -ieq [System.IO.Path]::GetPathRoot($Root)) {
+    $reason = "源目录是盘根 ($Root)"
+  }
+  else {
+    $files = @(Get-ProtectedFiles -Root $Root)
+    $count = $files.Count
+    $bytes = 0
+    if ($count -gt 0) { $bytes = ($files | Measure-Object -Property Length -Sum).Sum }
+    if ($count -gt $FileCountLimit) {
+      $reason = "文件数 $count 超过阈值 $FileCountLimit"
+    }
+    elseif ($bytes -gt $ByteLimit) {
+      $reason = "总字节数 $bytes ({0:N1} MB) 超过阈值 $ByteLimit (500 MB)" -f ($bytes / 1MB)
+    }
+  }
+  if (-not $reason) { return }
+  if ($ForceLarge) {
+    # 唯一逃生通道: 显式开关, 留痕到 actions.log, 让「当初是谁硬扛过去的」可追溯
+    Write-Warning "规模护栏被 -ForceLarge 显式越过: $reason (源: $Root)"
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    Write-Log "规模护栏被 -ForceLarge 越过: $reason (源: $Root)"
+    return
+  }
+  throw @(
+    "protect 已被规模护栏拒绝: $reason。",
+    "阈值: 文件数 > $FileCountLimit 或总字节 > $ByteLimit (500 MB), 或源为边界根/盘根。",
+    "请改用更具体的项目目录作 -Source (例: -Source `"D:\15812\projects\<项目名>`")。",
+    "如确需保护大规模目录, 显式加 -ForceLarge (该操作会记入 actions.log)。"
+  ) -join "`n"
+}
+
 function Get-Manifest {
   param([string]$Root)
   $items = Get-ProtectedFiles -Root $Root
@@ -240,6 +292,8 @@ function Remove-OldSnapshots {
 switch ($Action) {
 
   'protect' {
+    # 规模护栏必须先于一切写操作(含下面 New-Item 建目录)执行, 拒绝时源目录零副作用
+    Test-SourceScale -Root $Source
     $state = Get-State
     $appendHint = if ($state -and $state.protected) { ' (已处于保护状态, 追加新快照)' } else { '' }
     New-Item -ItemType Directory -Force -Path $SnapRoot, $StateDir, $ManifestsDir | Out-Null
