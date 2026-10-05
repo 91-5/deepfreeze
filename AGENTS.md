@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**72 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 20 项 H 系 SnapshotRoot）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**79 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,7 +26,7 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (72 项断言)** EXITCODE=0 |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (79 项断言)** EXITCODE=0 |
 | `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (0 warnings)** |
 | `gate.py` | `python ...\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json` | **PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)** |
 
@@ -318,6 +318,7 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 | `function Test-SourceScale` | 规模护栏。阈值常量定义在**函数体顶部**（`$FileCountLimit` / `$ByteLimit`），调整只改一处 |
 | `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。**注意内部用 `+=` 在循环里累加数组**（O(N²)），见 DFB-20261005-003 |
 | protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
+| `if ($SnapRoot -ne $DefaultSnapRoot`（unprotect -Purge 分支） | 孤儿清理：快照迁共享库后，purge 顺带清**本源**默认位置遗留快照；同 store 其他 srcKey 不碰、actions.log 保留 —— **H8 断言锁定**（评审返工 C1） |
 | `verify.ps1` 里的 `$env:DEEPFREEZE_ALLOWED_ROOT = $Root` | 自检把边界钉到仓库自身，所以每次自检都真实走到该配置路径 |
 
 **事故机制辨析**（两次中断机制不同，根因相同）：

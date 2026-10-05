@@ -12,8 +12,9 @@
   T6 purge 后重保护: 状态干净重建
   N1/N2 manifest 不泄漏不自包含; N3/N4 多快照+history; N5 指定快照还原;
   N6 默认还原最近; N7 快照轮转; N8 .tmp 半成品隔离
-  H1~H7 快照根可配 (DFB-20261005-002): 默认落点回归 / 共享库落点 / state.json 持久化 /
-        多源 srcKey 隔离不撞名 / 旧 state.json 向后兼容 / store 自动创建 / 护栏不放宽
+  H1~H8 快照根可配 (DFB-20261005-002): 默认落点回归 / 共享库落点 / state.json 持久化 /
+        多源 srcKey 隔离不撞名 / 旧 state.json 向后兼容 / store 自动创建 / 护栏不放宽 /
+        purge 孤儿清理边界 (返工 C1: 清本源默认位置遗留快照, 不碰他源 srcKey, 留审计日志)
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -338,6 +339,25 @@ $r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-SnapshotRoot', $HStore, 
 $hAfter = @(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp').Count
 Check 'H7 超阈源 + -SnapshotRoot 仍被规模护栏拒绝 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
 Check 'H7 拒绝时共享库零写入' ($hAfter -eq $hBefore) "before=$hBefore after=$hAfter"
+
+Write-Host "  [H8] unprotect -Purge 孤儿清理边界 (返工 C1): 清本源默认位置遗留快照, 不碰同 store 其他 srcKey"
+# 锁定卡外新增行为 (评审重点②): 迁移到共享库后 unprotect -Purge 会顺带清理默认位置的
+# 遗留快照 —— 行为实测安全, 但此前无断言 = 「对的但没保证以后还对」。三重判据:
+# ① 默认位置孤儿被清 ② 同 store 其他 srcKey 不被碰 (「只删本源」边界, 最关键) ③ actions.log 保留
+# 现场复用: H4 起 $HSrcB 即共享库模式 ($HStore\<keyB>), $HStore 同时含 Sandbox 早期写入的
+# keyA (2 快照) —— 天然的「两源一库」现场, purge $HSrcB 后 keyA 必须原样存活。
+New-Item -ItemType Directory -Force -Path "$HSrcB\.freeze-snap\snap-20260101-000000" | Out-Null
+'legacy-orphan' | Set-Content -LiteralPath "$HSrcB\.freeze-snap\snap-20260101-000000\legacy.txt" -Encoding UTF8
+$h8KeysBefore = @(Get-ChildItem -LiteralPath $HStore -Directory -ErrorAction SilentlyContinue)
+Check 'H8 前置: purge 前 store 含 2 个 srcKey' ($h8KeysBefore.Count -eq 2) "实际 $($h8KeysBefore.Count)"
+$r = Invoke-Deepfreeze @('unprotect', '-Source', $HSrcB, '-Purge', '-AutoConfirm')
+Check 'H8 共享库模式 unprotect -Purge 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'H8 ①默认位置遗留快照被清 (.freeze-snap 不复存在)' (-not (Test-Path -LiteralPath "$HSrcB\.freeze-snap"))
+$h8KeysAfter = @(Get-ChildItem -LiteralPath $HStore -Directory -ErrorAction SilentlyContinue)
+Check 'H8 ②他源 srcKey 存活 (store 剩 1 个 key, 未越界清库)' ($h8KeysAfter.Count -eq 1) "实际 $($h8KeysAfter.Count)"
+Check 'H8 ②他源快照数据完好 (keyA 的 2 个 snap 原样)' ((@(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -eq 2)
+Check 'H8 ③actions.log 审计日志保留 (C3 裁定)' (Test-Path -LiteralPath "$HSrcB\.freeze\actions.log")
+Check 'H8 ③日志含孤儿清理记录 (分支执行可追溯)' ((Get-Content -LiteralPath "$HSrcB\.freeze\actions.log" -Raw -ErrorAction SilentlyContinue) -match '同时清理默认位置的遗留快照')
 
 
 # ---------- 清理 ----------

@@ -342,7 +342,14 @@ switch ($Action) {
     # 规模护栏必须先于一切写操作(含下面 New-Item 建目录)执行, 拒绝时源目录零副作用
     Test-SourceScale -Root $Source
     # 共享库模式下在写之前明示实际落点 (卡 D2: 显式传参 + Write-Warning 记录, 不做路径边界校验)
-    if ($SnapshotRoot) { Write-Warning "快照根: 本次快照写入指定存储 $SnapRoot (源: $Source; 快照不再落在源目录内)" }
+    if ($SnapshotRoot) {
+      Write-Warning "快照根: 本次快照写入指定存储 $SnapRoot (源: $Source; 快照不再落在源目录内)"
+      # 返工 C2 (评审 Q4): 同卷组合第三重明示 —— 护栏只判源规模, -ForceLarge 放行后
+      # 快照仍完整落在源所在卷, 约·占同等容量, 用户必须知情
+      if ($ForceLarge -and ([System.IO.Path]::GetPathRoot($SnapRoot) -ieq [System.IO.Path]::GetPathRoot($Source))) {
+        Write-Warning "-ForceLarge + -SnapshotRoot 为同卷组合: 快照仍写入源所在卷 ($([System.IO.Path]::GetPathRoot($Source))), 将额外占用约与源同等容量, 请确认该卷剩余空间"
+      }
+    }
     $state = Get-State
     $appendHint = if ($state -and $state.protected) { ' (已处于保护状态, 追加新快照)' } else { '' }
     New-Item -ItemType Directory -Force -Path $SnapRoot, $StateDir, $ManifestsDir | Out-Null
