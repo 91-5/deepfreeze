@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**52 项断言**（39 项基线 N1~N8 + T1~T6，另 + 13 项 G 系规模护栏）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**72 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 20 项 H 系 SnapshotRoot）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,7 +26,7 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (52 项断言)** EXITCODE=0 |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (72 项断言)** EXITCODE=0 |
 | `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (0 warnings)** |
 | `gate.py` | `python ...\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json` | **PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)** |
 
@@ -75,7 +75,7 @@ DFB-20261003-001 / -002 的 artifact 早已被 004-001 重新判定，gate 正�
 | 2026-10-03 16:51 对 `C:\` 跑 protect | 31.42 GB / 114,012 文件，跑到一半被硬杀，`.tmp` 残骸占满 C 盘 |
 | 2026-10-03 17:01 对 `D:\15812` 跑 protect | 同样中断 |
 
-**根因**：`deepfreeze.ps1:60` 的默认边界是 `D:\15812`，而 `D:\15812` 实测 **33.9 GB / 33,777 文件**，其中 `Documents` 单目录就 4.7 GB。默认边界允许对边界内**任何目录**（含边界本身）跑 protect，所以「合法调用」也能造成灾难。
+**根因**：`deepfreeze.ps1` 里 `$AllowedRoot = 'D:\15812'` 这行默认边界，配合 `Test-WithinAllowed` 判据里的 `$FullPath -eq $AllowedRoot`（**源目录等于边界本身时判为「在边界内」**），使「对 `D:\15812`跑 protect」成为一次**静默通过全部校验的合法调用**。实测 `D:\15812` = **33.9 GB / 33,777 文件**，其中 `Documents` 单目录就 4.7 GB。
 
 **保护粒度参考**（实测体积，2026-10-04）：
 
@@ -130,7 +130,7 @@ git branch -vv
 
 `-Source` **必须命名传参**，不能依赖默认值。`-AutoConfirm` 跳过交互确认。
 
-> 本项目自身目前**没有** `.freeze` 快照（历史遗留，2026-10-04 核实）。首次开工时先打一份基线快照。
+> 本项目自身已有 `.freeze` 快照（2026-10-05 起，ZCode 按纪律开工前打的基线）。**动 `deepfreeze.ps1` / `verify.ps1` 之前先确认有可用快照**：`.\deepfreeze.ps1 history -Source "$PWD"`。
 
 ### 3. 改代码走出卡流程
 
@@ -199,9 +199,12 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 
 ### 进行中
 
-无。`.tasks\` 活跃区为空。
+| 卡 | 状态 | 内容 |
+|---|---|---|
+| `DFB-20261005-002` | `IN_REVIEW` | `-SnapshotRoot` 快照存储位置可配。ZCode 交付 `d5c03ef`，主控已独立复核（72/72 PASS、护栏未动），待 AgnesCode 评审 |
+| `DFB-20261005-003` | `OPEN` | manifest 读取的内存/时间放大四处（`history` 全量物化 7.4x / `Get-Diff` 的 `+=` 慢 142x / `ReadAllBytes` 整文件进内存 / restore 解析两遍）。待 ZCode 接单 |
 
-**最近完成**：`DFB-20261004-001`（protect 规模护栏）— 2026-10-04 全流程闭环，verdict `PASS`（round 2，0 blocker + 0 condition），已上线。
+**最近完成**：`DFB-20261004-001`（protect 规模护栏）— verdict `PASS`（round 2，0 blocker + 0 condition），已上线。
 
 ### 留作后续 EVO 的开放项
 
@@ -272,15 +275,26 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 
 ## 六、代码事实备忘（别重复查）
 
-| 位置 | 事实 |
+**用函数名/代码模式定位，不要写行号。** 行号会随每次改动漂移——本表曾因 DFB-20261005-002 插入 60 行而全部失准。行号与 HEAD 同属不稳定锚点（同 recurring-pitfalls 坑 15）。
+
+| 锚点（函数名 / 代码模式） | 事实 |
 |---|---|
-| `deepfreeze.ps1:12` | manifest 放 `.freeze\manifests` —— 防止 restore 时 `/MIR` 污染源目录造成自我拷贝 |
-| `deepfreeze.ps1:60` | 默认 `$AllowedRoot = 'D:\15812'`（**这就是上面那个隐患的根因**） |
-| `deepfreeze.ps1:127` | `$SnapRoot = Join-Path $Source '.freeze-snap'` —— 快照目录从被保护源路径推导 |
-| `deepfreeze.ps1:207` | robocopy `/XD` 只排除 `<Source>\.freeze` 与 `<Source>\.freeze-snap`（按路径排除，对 junction 生效） |
-| `deepfreeze.ps1:249/254/262-264` | 原子提交：先拷 `.tmp`，全成功才 `Move-Item` 成 `snap-<ts>` |
-| `deepfreeze.ps1:267-268` | catch 清 `.tmp` + manifest。**「无 `.tmp` 残骸」= 正常异常退出** |
-| `verify.ps1:22` | 自检把 `DEEPFREEZE_ALLOWED_ROOT` 钉到仓库自身，所以每次自检都真实走到该配置路径 |
+| `function Test-WithinAllowed` | 边界判定。注意其判据含 `$FullPath -eq $AllowedRoot`——**这一项正是整盘事故的根因**，规模护栏（`Test-SourceScale`）已补上兜底 |
+| `function Resolve-SourcePath` | 解析 + 链接真实目标判定；越界需 `-Force` + 二次确认 |
+| `$AllowedRoot = 'D:\15812'` | 默认边界（`Resolve-SourcePath` 之前）。实测 `D:\15812` = 33.9 GB / 33,777 文件 |
+| `$DefaultSnapRoot = Join-Path $Source '.freeze-snap'` | **不传 `-SnapshotRoot` 时**的快照落点 |
+| `$SnapRoot = Join-Path $store (Get-SrcKey -Path $Source)` | **传了 `-SnapshotRoot` 时**的落点；`Get-SrcKey` = 源路径 SHA256 前 12 位 |
+| `$ManifestsDir = Join-Path $StateDir 'manifests'` | 清单集中存放 —— 防止 restore 时 `/MIR` 污染源目录造成自我拷贝 |
+| `function Get-SnapshotManifestPath` | 按 ts 查清单。**多源共用 SnapshotRoot 时 srcKey 隔离就是为它服务的**——撞名会取到别人的清单 |
+| `'/XD', (Join-Path $Source '.freeze'), (Join-Path $Source '.freeze-snap')` | robocopy 排除**只按路径**。快照库路径不匹配就会被整个拷进快照 → 滚雪球。这是手工 junction 被禁的原因 |
+| `function Invoke-RobocopyMirror` | 封装 robocopy；exit ≥16 致命、=8 部分失败继续由哈希校验判定 |
+| `function Remove-OldSnapshots` | 轮转，默认 `-KeepSnapshots 5` |
+| `function Get-Sha256Hex` | 用 `[System.IO.File]::ReadAllBytes` **整文件进内存**——大文件风险，见 DFB-20261005-003 |
+| `function Get-ProtectedFiles` | 排除 `.freeze` / `.freeze-snap`，用 `-notlike "$Root\.freeze\*"` **前缀**匹配（与 robocopy 精确排除理论分叉，见开放项） |
+| `function Test-SourceScale` | 规模护栏。阈值常量定义在**函数体顶部**（`$FileCountLimit` / `$ByteLimit`），调整只改一处 |
+| `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。**注意内部用 `+=` 在循环里累加数组**（O(N²)），见 DFB-20261005-003 |
+| protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
+| `verify.ps1` 里的 `$env:DEEPFREEZE_ALLOWED_ROOT = $Root` | 自检把边界钉到仓库自身，所以每次自检都真实走到该配置路径 |
 
 **事故机制辨析**（两次中断机制不同，根因相同）：
 - **无 `.tmp` 残骸** → 进程正常抛错退出，catch 跑完了 → 预期行为

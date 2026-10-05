@@ -178,5 +178,4 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 |---|---|
 | `deepfreeze.ps1` | 主脚本 |
 | `verify.ps1` | 自检 |
-| `PROBE-README.md` | Ximo 沙箱读权限探针 |
 | `_selftest\` | 自检夹具（自动重建，已 gitignore） |
