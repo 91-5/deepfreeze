@@ -1,0 +1,26 @@
+{
+  "_comment": "Per-verdict gated artifacts for deepfreeze. Paths resolve against the PROCESS CWD, so gate.py must be run from inside this directory (see AGENTS.md). An id with no entry prints a NOTICE and skips the staleness rule -- which is how this project was silently unchecked until 2026-10-05. Add an entry the moment a verdict is issued; keep it equal to what the reviewer actually read.",
+
+  "_scope_notes": {
+    "DFB-20261004-001": "AGENTS.md is deliberately NOT listed. It is in the card's Owned files (D4 assigned the guard section to the implementer), but the only post-verdict edits were orchestrator bookkeeping unrelated to the guard (session-boundary section, baseline numbers, cf54b98). Listing it would report STALE on noise. If the guard section of AGENTS.md changes, re-review rather than re-map.",
+    "excluded_by_design": ".gitignore is not listed for DFB-20261004-001 even though condition C1 touched it: the change was made by the orchestrator (adcd846) before the verdict, and .gitignore is not a source artifact any verdict conclusion depends on."
+  },
+
+  "DFB-20261004-001": [
+    "deepfreeze.ps1",
+    "verify.ps1",
+    "README.md"
+  ],
+
+  "DFB-20261003-001": [
+    "deepfreeze.ps1",
+    "verify.ps1",
+    "README.md"
+  ],
+
+  "DFB-20261003-002": [
+    "deepfreeze.ps1",
+    "verify.ps1",
+    "README.md"
+  ]
+}

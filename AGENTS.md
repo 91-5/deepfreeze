@@ -15,24 +15,37 @@
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
 
-## 当前基线（2026-10-04 核实）
+## 当前基线（2026-10-05 核实）
 
 ```
-HEAD      786a82d  fix(verify): make G1 zero-write assertion env-independent
+HEAD      cf54b98  docs(ops): sync AGENTS.md to post-DFB-20261004-001 state
           ↑ 与 origin/main 同步，工作区干净
 git status 干净
 verify.ps1  52/52 PASS  EXITCODE=0
 lint_cards  PASS (0 warnings)
-gate.py     PASS（注意：freshness 未检查，本项目无 artifacts.json，见下）
+gate.py     PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)
 ```
 
 三仓库并行开发时的冲突面见文末。
 
-### ⚠️ 已知盲区：verdict 新鲜度未检查
+### ✅ 门禁已真正生效（2026-10-05 修复）
 
-`gate.py` 输出 `[NOTICE] freshness NOT checked - no entry in the artifact map` —— 本项目**没有 `artifacts.json`**，因此「verdict 是否比它judge的东西更新」这条规则**未启用**，verdict 失效不会被自动拦住。
+此前 `gate.py` 的「PASS」是**假的**——两个独立原因叠加：
 
-要根治需建 `artifacts.json` 声明每个 verdict 覆盖哪些文件（并用 `--artifact-map` 传入）。**属新工作，尚未排期。** 在此之前，门禁新鲜度靠人工核 HEAD。
+1. **verdict 目录指向空处**。DFB-20261004-001 归档后 `verdicts\` 已空，日常命令 `--verdict-dir verdicts` 实际检查 **0 个 verdict**（带 `--require` 时直接 `MISSING_VERDICT` FAIL）。
+2. **没有 `artifacts.json`**，`freshness NOT checked`——verdict 失效不会被拦。
+
+现两处都已修，命令见「二、5 改完跑门禁」。**已双向验证**（非只验通过路径）：
+
+| 测试 | 期望 | 实测 |
+|---|---|---|
+| 正向：现状 | PASS | ✅ PASS (3 checked) |
+| **反向：把 README.md mtime 推到当前** | 必须报 STALE | ✅ `[STALE_VERDICT] ... 2026-10-05T08:14 > 2026-10-04T12:03`，EXIT=1 |
+| 还原 mtime 后 | 恢复 PASS | ✅ PASS (1 checked) |
+
+DFB-20261003-001 / -002 的 artifact 早已被 004-001 重新判定，gate 正确降级为 `SUPERSEDED`（不阻塞）。
+
+**维护提醒**：新增 verdict 后必须同步在 `artifacts.json` 加条目，否则该 id 又退回「不检查」。理由写在 `artifacts.json` 的 `_scope_notes` 里。
 
 ---
 
@@ -121,12 +134,25 @@ git branch -vv
 
 **没跑过自检的卡不许递出去。** Acceptance 里每一条都是带退出码的命令，必须自己跑完并贴出真实输出。
 
-### 5. 改完跑双门禁
+### 5. 改完跑三门禁（全部必须跑）
 
 ```powershell
+cd D:\15812\projects\deepfreeze        # ⚠️ 必须先 cd，理由见下方坑
+
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1     # 必须 EXITCODE=0
 python D:\15812\projects\agent-covenant\tools\lint_cards.py --dir .tasks --verdict-dir verdicts
+python D:\15812\projects\agent-covenant\tools\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json
 ```
+
+#### ⚠️ gate.py 必须在 deepfreeze 目录内跑
+
+`artifacts.json` 里的路径是**相对路径**，相对**进程 CWD** 解析。在仓库根（或任何别处）跑会 `ARTIFACT_MISSING` 误报。
+
+#### `--verdict-dir` 指向 `.tasks\archive\` 而非 `verdicts\`
+
+`verdicts\` 只放**活跃卡**的 verdict。本项目目前无活跃卡，该目录为空——用 `--require` 会 `MISSING_VERDICT` FAIL，不带 `--require` 则「检查 0 个」假装通过。
+
+所有已完成卡的 verdict 与卡成对归档在 `.tasks\archive\`，那才是真正的检查对象。
 
 ---
 
@@ -143,7 +169,7 @@ python D:\15812\projects\agent-covenant\tools\lint_cards.py --dir .tasks --verdi
 | `Desktop\.freeze-snap` / `D:\15812\.freeze-snap` 空壳 | 已删 |
 | `AGENTS.md` 本文件 | 已建 |
 
-commit：`fd24c26`。lint 从 **8 warnings → 1 warning**（仅剩 OPEN 卡无 verdict，属正常）。
+commit：`fd24c26`。lint 从 **8 warnings → 0 warnings**（8 条全部消解：2 条 `CLOSED_NOT_ARCHIVED` + 5 条 `VERDICT_WITHOUT_REVIEW` 随卡归档消解，1 条 `TASK_MISSING_REVIEW_QUESTIONS` 由新卡补齐段落）。
 
 ### 目录布局约定（改动后）
 
@@ -166,7 +192,7 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 
 无。`.tasks\` 活跃区为空。
 
-**最近完成**：`DFB-20261004-001`（protect 规模护栏）— 2026-10-04 全流程闭环，verdict `PASS`（round 2，0 blocker + 0 condition），已 push 至 `origin/main`（`786a82d`）。
+**最近完成**：`DFB-20261004-001`（protect 规模护栏）— 2026-10-04 全流程闭环，verdict `PASS`（round 2，0 blocker + 0 condition），已上线。
 
 ### 留作后续 EVO 的开放项
 
@@ -174,7 +200,8 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 |---|---|---|
 | 排除语义统一 | `Get-ProtectedFiles` 用 `-notlike "$Root\.freeze\*"`（**前缀**匹配）vs robocopy `/XD`（**路径精确**排除）。理论分叉仅在 `.freezeX` 这类恰好前缀命中的目录名，实际场景不存在 | 评审维度 5 |
 | verify 降本 | `verify.ps1` 每次跑写 5001 文件 + ~525MB，墙钟 **~72s**，相对秒级基线是数量级退化。判定可接受，建议改稀疏文件/不落盘构造 | 评审维度 6 |
-| verdict 新鲜度 | 本项目无 `artifacts.json`，gate 的 staleness 规则未启用（见「当前基线」下的盲区说明） | 本轮 |
+
+（原先第三项「verdict 新鲜度」已于 2026-10-05 修复，见「当前基线」下的小节。）
 
 ---
 
