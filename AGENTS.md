@@ -1,4 +1,4 @@
-# AGENTS.md — deepfreeze 项目上下文
+﻿# AGENTS.md — deepfreeze 项目上下文
 
 > 本文件是 deepfreeze 的**项目根上下文**。所有 agent 在本项目动手前先读它。
 > 与私有记忆冲突时，**以本文件为准**。
@@ -17,14 +17,18 @@
 
 ## 当前基线（2026-10-05 核实）
 
+```powershell
+# ⚠️ 不要在本文件里 hardcode HEAD —— 任何更新基线的提交本身就会让那个值过期，
+#    形成「改一次过期一次」的追赶循环（同 recurring-pitfalls 坑 15）。现场读：
+git rev-parse --short HEAD
+git status --short          # 必须空
 ```
-HEAD      cf54b98  docs(ops): sync AGENTS.md to post-DFB-20261004-001 state
-          ↑ 与 origin/main 同步，工作区干净
-git status 干净
-verify.ps1  52/52 PASS  EXITCODE=0
-lint_cards  PASS (0 warnings)
-gate.py     PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)
-```
+
+| 门禁 | 命令 | 最近实测 |
+|---|---|---|
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (52 项断言)** EXITCODE=0 |
+| `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (0 warnings)** |
+| `gate.py` | `python ...\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json` | **PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)** |
 
 三仓库并行开发时的冲突面见文末。
 
