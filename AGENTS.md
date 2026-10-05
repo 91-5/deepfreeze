@@ -236,6 +236,7 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 |---|---|---|
 | 排除语义统一 | `Get-ProtectedFiles` 用 `-notlike "$Root\.freeze\*"`（**前缀**匹配）vs robocopy `/XD`（**路径精确**排除）。理论分叉仅在 `.freezeX` 这类恰好前缀命中的目录名，实际场景不存在 | 评审维度 5 |
 | verify 降本 | `verify.ps1` 每次跑写 5001 文件 + ~525MB，墙钟 **~72s**，相对秒级基线是数量级退化。判定可接受，建议改稀疏文件/不落盘构造 | 评审维度 6 |
+| **S1**（DFB-20261005-002 后续） | `-ForceLarge` 不传 `-SnapshotRoot` 时（默认落点 `<Source>\.freeze-snap` 天然同卷）无「正在吃满源卷」空间警告。C2 已覆盖 `-SnapshotRoot` 同卷路径，但默认落点未补。建议一行 `Write-Warning` 补齐。**预存缺口，非本卡引入，不阻塞** | R2 评审 S1 |
 
 （原先第三项「verdict 新鲜度」已于 2026-10-05 修复，见「当前基线」下的小节。）
 
