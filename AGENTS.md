@@ -91,13 +91,18 @@ DFB-20261003-001 / -002 的 artifact 早已被 004-001 重新判定，gate 正�
 
 > 以上禁止已由 `deepfreeze.ps1` 的规模护栏（`Test-SourceScale`）强制执行：源=边界根/盘根、文件数 > 5000 或字节 > 500 MB 时 `protect` 直接拒绝，`-AutoConfirm` 不能绕过；确需硬闯须显式 `-ForceLarge`，且会记入 `actions.log`（DFB-20261004-001）。
 
-### 🚫 禁止手工创建 `.freeze` / `.freeze-snap` 在边界外
+### 🚫 禁止手工建 junction 当快照库 —— 用 `-SnapshotRoot`（DFB-20261005-002）
 
-`.freeze-snap` 的位置由 `deepfreeze.ps1:127` 从 `-Source` 推导，**不要**手工把快照库放到 `-Source` 之外再 junction 回去。
+「快照存到别的盘」现在有正式机制：`protect -Source <源> -SnapshotRoot <存储根>`，位置持久化在
+`<Source>\.freeze\state.json` 的 `snapshot_root` 字段，其余子命令自动读回。**不要**再手工把快照库
+放到 `-Source` 之外再 junction 回去。
 
-**为什么**：`deepfreeze.ps1:207` 的 robocopy `/XD` **只排除** `<Source>\.freeze` 和 `<Source>\.freeze-snap`。任何路径不匹配的快照库（例：曾在用的 `D:\deepfreeze-snap`）都会被当**普通目录整个拷进快照**，导致每次 protect 体积滚雪球翻倍。
+**为什么 junction 是错的**：robocopy 的 `/XD` **只按路径排除** `<Source>\.freeze` 与
+`<Source>\.freeze-snap`。任何路径不匹配的快照库（例：曾在用的 `D:\deepfreeze-snap`）都会被当
+**普通目录整个拷进快照**，每次 protect 体积滚雪球翻倍。`-SnapshotRoot` 是工具内建的解法，
+共享库按 srcKey（源路径哈希前 12 位）分目录隔离多源，`snap-<ts>` 不跨源撞名。
 
-2026-10-04 已清理：`C:\.freeze-snap`（junction→`D:\deepfreeze-snap`）与目标目录均已删除。
+2026-10-04 已清理手工 junction 遗骸：`C:\.freeze-snap`（junction→`D:\deepfreeze-snap`）与目标目录均已删除。
 
 ### 🚫 禁止改动 `.gitignore` 里的评审产物条目
 

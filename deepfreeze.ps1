@@ -11,6 +11,8 @@
              规模护栏: protect 前置检查, 源=安全边界根/盘根/文件数>5000/字节数>500MB 一律拒绝
              (fail-closed), -AutoConfirm 不能绕过; 唯一逃生通道 -ForceLarge, 硬闯记入 actions.log
   快照布局: <Source>\.freeze-snap\snap-<yyyyMMdd-HHmmss>\  (每次 protect 新增一个, 不覆盖)
+             或 -SnapshotRoot 指定共享库: <SnapshotRoot>\<srcKey>\snap-<ts> (srcKey=源路径哈希前12位,
+             多源隔离; 位置持久化在 state.json 的 snapshot_root 字段, 其余子命令凭它读回)
   清单存放: <Source>\.freeze\manifests\<ts>.json  (集中存放, 不进快照目录 —— 防止 restore 时被 /MIR 拷回源根造成自我污染)
   状态与日志: <Source>\.freeze\state.json, actions.log
   向导: restore 前自动打 pre-restore 备份(默认保留最近 3 份); restore 后按 manifest 逐文件校验哈希;
@@ -51,6 +53,15 @@ param(
   # 规模护栏(DFB-20261004-001)的显式逃生通道: 对边界根/盘根/超大规模目录仍要 protect 时使用。
   # 与 -Force(越安全边界)语义不同、分开计, 硬闯会 Write-Warning 并记入 actions.log 可追溯
   [switch]$ForceLarge,
+
+  # 快照存储位置(DFB-20261005-002): 快照库可放到源目录之外(例: 源在 C 盘项目、快照落 D 盘),
+  # 替代已废弃的手工 junction 方案(边界外快照库会被 robocopy /XD 当普通目录拷进快照, 滚雪球)。
+  # 仅 protect 接收; 共享库模式下快照落 <SnapshotRoot>\<srcKey>\snap-<ts>,
+  # srcKey = 解析后源路径(小写、斜杠归一)SHA256 前 12 位 —— 多源共用一库时隔离, 防 snap-<ts> 撞名
+  # 导致 Get-SnapshotManifestPath 取到别人清单的数据损坏。
+  # 不传时行为不变: <Source>\.freeze-snap。restore/status/history/unprotect 不接收该参数,
+  # 从 .freeze\state.json 的 snapshot_root 字段读回实际位置(旧 state.json 无该字段则回落默认)。
+  [string]$SnapshotRoot,
 
   [switch]$AutoConfirm
 )
@@ -130,7 +141,6 @@ function Resolve-SourcePath {  param([string]$PathArg)
 }
 
 $Source = Resolve-SourcePath -PathArg $Source
-$SnapRoot = Join-Path $Source '.freeze-snap'
 $StateDir = Join-Path $Source '.freeze'
 $ManifestsDir = Join-Path $StateDir 'manifests'
 $StateFile = Join-Path $StateDir 'state.json'
@@ -141,6 +151,42 @@ function Get-State {
     return Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
   }
   return $null
+}
+
+function Get-SrcKey {
+  # 源身份键 (DFB-20261005-002): 解析后源路径小写 + 斜杠归一后 SHA256 前 12 位 hex。
+  # 多源共用一个 SnapshotRoot 时按 srcKey 分目录, snap-<ts> 不再跨源撞名;
+  # 同一真实目录的别名路径(junction)解析后同源 → 同 key, 语义正确。
+  # 12 hex = 48 bit: 两源撞 key 概率 ~2^-49 量级, 可读性换隔离性(卡内已确认取舍)。
+  param([string]$Path)
+  $norm = $Path.ToLowerInvariant().Replace('/', '\')
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($norm)
+    return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '')).Substring(0, 12)
+  } finally { $sha.Dispose() }
+}
+
+# ---- 快照根解析 (DFB-20261005-002) ----
+# $SnapRoot 语义 = 本源专属快照目录: 默认模式 <Source>\.freeze-snap; 共享库模式 <SnapshotRoot>\<srcKey>。
+# 优先级: protect 显式 -SnapshotRoot > state.json 记录(含共享库模式下的持续生效) > 默认位置(向后兼容)。
+# 此处只做纯路径计算, 不创建任何目录 —— 落盘统一交给 protect 内的 New-Item,
+# 保证规模护栏拒绝时零副作用(与 DFB-20261004-001 的零写入语义一致)。
+$DefaultSnapRoot = Join-Path $Source '.freeze-snap'
+$SnapRoot = $DefaultSnapRoot
+if ($SnapshotRoot -and $Action -ne 'protect') {
+  throw "-SnapshotRoot 仅对 protect 子命令生效; restore/status/history/unprotect 从 .freeze\state.json 的 snapshot_root 字段读取实际快照位置"
+}
+if ($Action -eq 'protect' -and $SnapshotRoot) {
+  $store = $SnapshotRoot.TrimEnd('\')
+  if (-not $store) { throw '-SnapshotRoot 不能是空路径' }
+  $SnapRoot = Join-Path $store (Get-SrcKey -Path $Source)
+}
+else {
+  $state0 = Get-State
+  if ($state0 -and $state0.PSObject.Properties['snapshot_root'] -and $state0.snapshot_root) {
+    $SnapRoot = [string]$state0.snapshot_root
+  }
 }
 
 function Get-Snapshots {
@@ -295,6 +341,8 @@ switch ($Action) {
   'protect' {
     # 规模护栏必须先于一切写操作(含下面 New-Item 建目录)执行, 拒绝时源目录零副作用
     Test-SourceScale -Root $Source
+    # 共享库模式下在写之前明示实际落点 (卡 D2: 显式传参 + Write-Warning 记录, 不做路径边界校验)
+    if ($SnapshotRoot) { Write-Warning "快照根: 本次快照写入指定存储 $SnapRoot (源: $Source; 快照不再落在源目录内)" }
     $state = Get-State
     $appendHint = if ($state -and $state.protected) { ' (已处于保护状态, 追加新快照)' } else { '' }
     New-Item -ItemType Directory -Force -Path $SnapRoot, $StateDir, $ManifestsDir | Out-Null
@@ -329,6 +377,9 @@ switch ($Action) {
       snapshot_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
       latest_snapshot = $ts
       file_count = $manifest.files.Count
+      # 实际使用的快照目录绝对路径 (DFB-20261005-002): 共享库模式下 = <SnapshotRoot>\<srcKey>,
+      # restore/status/history/unprotect 凭此字段找快照; 旧版 state.json 无此字段 → 回落默认位置
+      snapshot_root = $SnapRoot
     }
     ($newState | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding UTF8
     Remove-OldSnapshots
@@ -428,6 +479,13 @@ switch ($Action) {
     if (-not (Test-Gate -Description 'unprotect' -ActionText 'unprotect')) { Write-Host '已取消'; return }
     if ($Purge) {
       Remove-Item -LiteralPath $SnapRoot -Recurse -Force -ErrorAction SilentlyContinue
+      # 快照根迁到共享库后(DFB-20261005-002), 历史上落在默认位置的旧快照成为孤儿
+      # (restore/history 已读不到)。-Purge 的语义是清空本源快照数据, 顺带清掉防残留;
+      # 默认模式下两者同路径, 此分支不触发, 行为与迁移前完全一致
+      if ($SnapRoot -ne $DefaultSnapRoot -and (Test-Path -LiteralPath $DefaultSnapRoot)) {
+        Remove-Item -LiteralPath $DefaultSnapRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "  同时清理默认位置的遗留快照: $DefaultSnapRoot"
+      }
       Remove-Item -LiteralPath $ManifestsDir -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
       # 措辞对齐实际行为(返工单 C3): -Purge 删快照/清单/状态, 但 actions.log 审计日志保留

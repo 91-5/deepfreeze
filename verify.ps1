@@ -12,6 +12,8 @@
   T6 purge 后重保护: 状态干净重建
   N1/N2 manifest 不泄漏不自包含; N3/N4 多快照+history; N5 指定快照还原;
   N6 默认还原最近; N7 快照轮转; N8 .tmp 半成品隔离
+  H1~H7 快照根可配 (DFB-20261005-002): 默认落点回归 / 共享库落点 / state.json 持久化 /
+        多源 srcKey 隔离不撞名 / 旧 state.json 向后兼容 / store 自动创建 / 护栏不放宽
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -271,7 +273,78 @@ Reset-Sandbox
 $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
 Check 'G6 正常目录 protect 成功 (exit 0, 未被误杀)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
 
+# ---------- H1~H7 快照根可配 (DFB-20261005-002, 追加于 52 项基线之后, 未改动任何既有断言) ----------
+Write-Host "`n[H系列] -SnapshotRoot 快照存储位置可配"
+$HStore  = Join-Path $Root '_selftest\snapstore'
+$HStore2 = Join-Path $Root '_selftest\snapstore-auto'
+$HSrcB   = Join-Path $Root '_selftest\data-srcB'
+if (Test-Path -LiteralPath $HStore)  { Remove-Item -LiteralPath $HStore  -Recurse -Force }
+if (Test-Path -LiteralPath $HStore2) { Remove-Item -LiteralPath $HStore2 -Recurse -Force }
+if (Test-Path -LiteralPath $HSrcB)   { Remove-Item -LiteralPath $HSrcB   -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $HSrcB | Out-Null
+'b-content' | Set-Content -LiteralPath "$HSrcB\b.txt" -Encoding UTF8
+
+Write-Host "  [H1] 回归: 不传 -SnapshotRoot 时默认落点不变"
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'H1 默认模式 protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'H1 快照仍落在 <Source>\.freeze-snap' ((@(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -ge 1)
+$hstate = Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+Check 'H1 state.json 记录 snapshot_root 且=默认落点' ($hstate.PSObject.Properties['snapshot_root'] -and $hstate.snapshot_root -eq "$Sandbox\.freeze-snap")
+
+Write-Host "  [H2] 指定 -SnapshotRoot: 快照落指定根 (store 不存在→自动创建), 源目录无 .freeze-snap"
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-SnapshotRoot', $HStore, '-AutoConfirm')
+Check 'H2 共享库模式 protect 成功 (exit 0, 含不存在 store 自动创建)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'H2 快照落在 <SnapshotRoot>\<srcKey>\snap-* 下' ((@(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -ge 1)
+Check 'H2 源目录未产生 .freeze-snap' (-not (Test-Path -LiteralPath "$Sandbox\.freeze-snap"))
+
+Write-Host "  [H3] 持久化: restore/history 不带位置参数, 从 state.json 读回共享库"
+'tampered' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'H3 restore 不带快照位置参数成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'H3 内容从共享库快照恢复' (((Get-Content -LiteralPath "$Sandbox\a.txt" -Raw).TrimEnd("`r","`n")) -eq 'alpha-content')
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'H3 history 不带参数列出共享库快照 (exit 0 且含时间戳)' ($r.Code -eq 0 -and ([regex]::Matches($r.Out, 'snap-\d{8}-\d{6}')).Count -ge 1) "exit=$($r.Code)"
+
+Write-Host "  [H4] 核心不变量: 两个不同源共用一个 store, srcKey 子目录互异不撞名"
+$null = Invoke-Deepfreeze @('protect', '-Source', $HSrcB, '-SnapshotRoot', $HStore, '-AutoConfirm')
+$hKeys = @(Get-ChildItem -LiteralPath $HStore -Directory)
+Check 'H4 共享库下产生 2 个 srcKey 目录' ($hKeys.Count -eq 2) "实际 $($hKeys.Count)"
+Check 'H4 srcKey 目录名两两不同' ((@($hKeys | ForEach-Object { $_.Name } | Select-Object -Unique)).Count -eq $hKeys.Count)
+$rA = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'H4 源A history 只见自己的快照 (1 个, 跨源不可见)' (([regex]::Matches($rA.Out, 'snap-\d{8}-\d{6}')).Count -eq 1)
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')   # 不带 -SnapshotRoot: 应循 state.json 留在共享库
+Check 'H4 重复 protect 不带参数仍落共享库 (未回退默认落点)' (-not (Test-Path -LiteralPath "$Sandbox\.freeze-snap"))
+$hSnaps = @(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')
+Check 'H4 共享库快照总数=3 (A:2 + B:1, 各源隔离无混写)' ($hSnaps.Count -eq 3) "实际 $($hSnaps.Count)"
+
+Write-Host "  [H5] 向后兼容: 旧 state.json (无 snapshot_root 字段) 不崩, 回落默认位置"
+$hstate = Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+$hstate.PSObject.Properties.Remove('snapshot_root')
+($hstate | ConvertTo-Json) | Set-Content -LiteralPath "$Sandbox\.freeze\state.json" -Encoding UTF8
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'H5 旧 state.json: history 不崩 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'H5 回落默认位置 (共享库快照不可见, 输出无快照)' ($r.Out -match '无快照')
+
+Write-Host "  [H6] 不存在的 SnapshotRoot 显式自动创建"
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-SnapshotRoot', $HStore2, '-AutoConfirm')
+Check 'H6 store 不存在时 protect 成功且目录已建' ($r.Code -eq 0 -and (Test-Path -LiteralPath $HStore2 -PathType Container)) "exit=$($r.Code)"
+Check 'H6 新 store 下有真实快照' ((@(Get-ChildItem -LiteralPath $HStore2 -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -ge 1)
+
+Write-Host "  [H7] 护栏未被 -SnapshotRoot 放宽: 超阈源仍拒绝, 共享库零写入"
+$hBefore = @(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp').Count
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-SnapshotRoot', $HStore, '-AutoConfirm')
+$hAfter = @(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp').Count
+Check 'H7 超阈源 + -SnapshotRoot 仍被规模护栏拒绝 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'H7 拒绝时共享库零写入' ($hAfter -eq $hBefore) "before=$hBefore after=$hAfter"
+
+
 # ---------- 清理 ----------
+if (Test-Path -LiteralPath "$HSrcB\.freeze") { $null = Invoke-Deepfreeze @('unprotect', '-Source', $HSrcB, '-Purge', '-AutoConfirm') }
+Remove-Item -LiteralPath $HSrcB   -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $HStore  -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $HStore2 -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path -LiteralPath $jlink)  { [System.IO.Directory]::Delete($jlink, $true) }
 if (Test-Path -LiteralPath $jlink2) { [System.IO.Directory]::Delete($jlink2, $true) }
 Remove-Item -LiteralPath $gBig   -Recurse -Force -ErrorAction SilentlyContinue

@@ -37,6 +37,15 @@ $env:DEEPFREEZE_ALLOWED_ROOT = "C:\你的项目根"
 # 保护（打一个新快照；已保护状态下再 protect 会追加快照，不覆盖）
 .\deepfreeze.ps1 protect -Source "<你的目录>"
 
+# 保护 + 快照存到别处（-SnapshotRoot，DFB-20261005-002）
+# 快照不再落在 <Source>\.freeze-snap，而是 <SnapshotRoot>\<srcKey>\snap-<ts>
+# （srcKey = 源路径 SHA256 前 12 位，多源共用一库时互相隔离，snap-<ts> 不撞名）
+.\deepfreeze.ps1 protect -Source "C:\某个项目" -AllowedRoot "C:\" -SnapshotRoot "D:\deepfreeze-store" -AutoConfirm
+# 快照位置持久化在 <Source>\.freeze\state.json 的 snapshot_root 字段：
+# restore / status / history / unprotect 不带任何位置参数，自动从该字段读回实际快照位置。
+# 之后对该源的 protect 即使不带 -SnapshotRoot 也会继续落同一位置（显式传参可随时改）。
+# 不传 -SnapshotRoot 时行为与旧版完全一致：<Source>\.freeze-snap。
+
 # 查看状态（含快照后变更 diff 预览）
 .\deepfreeze.ps1 status -Source "<你的目录>"
 
@@ -65,7 +74,9 @@ $env:DEEPFREEZE_ALLOWED_ROOT = "C:\你的项目根"
 protect 采用**先写临时目录、成功后原子 rename** 的提交方式——中断（Ctrl+C / 崩溃 / 磁盘满）
 只会留下一个被 history 和轮转忽略的 `*.tmp` 残骸，不会污染快照序列。
 
-## 目录布局（保护目标内）
+## 目录布局（两种模式）
+
+**默认模式**（不传 `-SnapshotRoot`，与旧版一致）——快照与状态都在被保护目录内：
 
 ```
 <Source>\
@@ -76,6 +87,23 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
    ├─ snap-<yyyyMMdd-HHmmss>\      # 快照镜像（每次 protect 新增一个，不覆盖）
    └─ snap-<...>.tmp\              # protect 进行中的半成品（中断残留，不参与任何统计）
 ```
+
+**共享库模式**（protect 时传 `-SnapshotRoot`）——快照挪到源目录之外的独立存储，
+源目录内只剩 `.freeze\`（状态与清单），不再产生 `.freeze-snap\`：
+
+```
+<SnapshotRoot>\                    # 例: D:\deepfreeze-store（可与其他源不同卷）
+├─ <srcKey>\                       # 源路径 SHA256 前 12 位 —— 多源隔离，snap-<ts> 不跨源撞名
+│  ├─ snap-<yyyyMMdd-HHmmss>\
+│  └─ snap-<...>.tmp\
+└─ <srcKey2>\                      # 另一个源的快照（互不可见）
+```
+
+- 快照位置记在 `<Source>\.freeze\state.json` 的 `snapshot_root` 字段（每次 protect 写入实际使用的目录）；
+  `restore`/`status`/`history`/`unprotect` 从它读回，旧版 state.json 无此字段时回落默认位置（向后兼容）。
+- **不要把 `-SnapshotRoot` 指到被保护源目录内部**——那会退化为「快照套快照」滚雪球，等价于当年被删除的 junction 方案。
+- `unprotect -Purge` 会清空**本源**在共享库下的快照目录（`<SnapshotRoot>\<srcKey>`），不影响同库其他源；
+  若源目录残留迁移前落在默认位置的旧快照，也会一并清理。
 
 清单**刻意不放进快照目录**：restore 的 `robocopy /MIR` 源是快照目录，清单若在其中会被
 原样拷回源根（自我污染，实测复现过的 bug），且快照越多泄漏越多。清单移到 `.freeze\manifests\`
@@ -94,6 +122,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 | 哈希校验 | restore 后按 manifest 逐文件校验；**文件被锁计入漂移并明确报出**，不会半路崩溃（throw 终止，不用 exit N，不杀调用方 shell） |
 | 拒绝裸奔 | 未 protect 时 restore 直接抛错拒绝；快照全部缺失同样拒绝 |
 | 确认门槛 | protect/restore/unprotect 走 Test-Gate（ShouldProcess 支持 -WhatIf + ShouldContinue 必弹确认）；`-AutoConfirm` 供脚本跳过 |
+| 快照根与源解耦 | `-SnapshotRoot` 可把快照放到与源**不同卷**的独立存储（源在 C 盘项目、快照落 D 盘），工具不再需要手工 junction——边界外的快照库不会被 robocopy `/XD` 当普通目录拷进快照，杜绝滚雪球。共享库按 srcKey 隔离多源；`-SnapshotRoot` 仅 protect 接收，其余子命令从 `state.json` 读回。该参数**不做路径边界校验**（显式传参即责任自负，实际落点会 `Write-Warning` 明示），但**不放宽规模护栏**——护栏拒绝的永远是"源太大"，与快照存哪无关 |
 
 ## 自检
 
@@ -102,7 +131,9 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 # 核心 正/负路径 + T1锁文件 / T2快照缺失 / T3备份轮转 / T4 Unicode名 / T5 junction穿透 / T6 purge重保护
 # + N1清单不泄漏 / N2清单不自包含 / N3多快照 / N4 history / N5指定快照还原 / N6默认还原最近 / N7快照轮转 / N8 .tmp隔离
 # + G1~G6 规模护栏（边界根/盘根/超文件数/超字节被拒、-ForceLarge 逃生留痕、正常目录不误杀）
-# PASS = exit 0（当前 52 项断言：39 项基线 + 13 项 G 系规模护栏断言）
+# + H1~H7 快照根可配（默认落点回归 / 共享库落点 / state.json 持久化 / 多源 srcKey 隔离 /
+#   旧 state.json 向后兼容 / store 自动创建 / 护栏不因 -SnapshotRoot 放宽）
+# PASS = exit 0（断言总数见脚本尾部输出：39 项基线 + 13 项 G 系 + H 系快照根断言）
 ```
 
 ## 已知边界（这能做什么 / 不能做什么，请如实理解）
