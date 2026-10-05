@@ -150,18 +150,42 @@ cd D:\15812\projects\deepfreeze        # ⚠️ 必须先 cd，理由见下方�
 
 powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1     # 必须 EXITCODE=0
 python D:\15812\projects\agent-covenant\tools\lint_cards.py --dir .tasks --verdict-dir verdicts
+
+# gate 必须跑两次——两个 verdict 目录都要查（2026-10-05 修正）
+python D:\15812\projects\agent-covenant\tools\gate.py --verdict-dir verdicts      --artifact-map artifacts.json
 python D:\15812\projects\agent-covenant\tools\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json
 ```
 
-#### ⚠️ gate.py 必须在 deepfreeze 目录内跑
+#### ⚠️ gate.py 必须查**两个** verdict 目录
+
+`--verdict-dir` 只接受**单个**目录，而本项目的 verdict 分两处：
+
+| 目录 | 内容 |
+|---|---|
+| `verdicts\` | **活跃卡**的 verdict（`IN_REVIEW`/`RETURNED` 阶段） |
+| `.tasks\archive\` | 已归档卡的 verdict（`GATED`/`CLOSED` 后与卡成对移入） |
+
+**只跑 `--verdict-dir .tasks\archive` 会完全看不见活跃卡的 verdict。** 2026-10-05 实测：`DFB-20261005-002` 的 `CONDITIONAL` 落在 `verdicts\`，只查 archive 时**一条都看不到**。
+
+**后果**：条件未清的卡会被静默放过——正是本会话一直在修的那类盲区。
+
+#### ⚠️ 活跃区出现 CONDITIONAL 时会 FAIL
+
+```
+[CONDITIONAL_NOT_ALLOWED] DFB-20261005-002: CONDITIONAL requires --allow-conditional
+```
+
+这是**预期行为**：条件没清完就不该放行。**不要**用 `--allow-conditional` 绕过——先处理 condition。真要放行必须 sir 明确批准，且在交付说明里写明依据。
+
+#### ⚠️ 旧 verdict 的 STALE 要等新 verdict 归档才消解
+
+`_successeded_by` 机制**只在 successor verdict 位于同一目录时生效**。新卡 verdict 在 `verdicts\` 时，它无法接管 archive 里旧卡对同一批文件的判定——旧 verdict 仍报 STALE。
+
+**STALE 转 SUPERSEDED 的时点**：新卡走完 `GATED` → 卡与 verdict **成对移入 `.tasks\archive\`** 之后。
+
+#### ⚠️ gate 必须在 deepfreeze 目录内跑
 
 `artifacts.json` 里的路径是**相对路径**，相对**进程 CWD** 解析。在仓库根（或任何别处）跑会 `ARTIFACT_MISSING` 误报。
-
-#### `--verdict-dir` 指向 `.tasks\archive\` 而非 `verdicts\`
-
-`verdicts\` 只放**活跃卡**的 verdict。本项目目前无活跃卡，该目录为空——用 `--require` 会 `MISSING_VERDICT` FAIL，不带 `--require` 则「检查 0 个」假装通过。
-
-所有已完成卡的 verdict 与卡成对归档在 `.tasks\archive\`，那才是真正的检查对象。
 
 ---
 
