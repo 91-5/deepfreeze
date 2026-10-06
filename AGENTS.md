@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**79 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**87 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,7 +26,7 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (79 项断言)** EXITCODE=0 |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (87 项断言)** EXITCODE=0 |
 | `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (0 warnings)** |
 | `gate.py` | `python ...\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json` | **PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)** |
 
@@ -226,7 +226,7 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 | 卡 | 状态 | 内容 |
 |---|---|---|
 | `DFB-20261005-002` | `IN_REVIEW` | `-SnapshotRoot` 快照存储位置可配。ZCode 交付 `d5c03ef`，主控已独立复核（72/72 PASS、护栏未动），待 AgnesCode 评审 |
-| `DFB-20261005-003` | `OPEN` | manifest 读取的内存/时间放大四处（`history` 全量物化 7.4x / `Get-Diff` 的 `+=` 慢 142x / `ReadAllBytes` 整文件进内存 / restore 解析两遍）。待 ZCode 接单 |
+| `DFB-20261005-003` | `IN_REVIEW` | manifest 内存/时间优化四处。ZCode 交付 `7ccbd10`，主控已独立复核（87/87 PASS、护栏零触碰、哈希第三方比对逐位一致），待 AgnesCode 评审 |
 
 **最近完成**：`DFB-20261004-001`（protect 规模护栏）— verdict `PASS`（round 2，0 blocker + 0 condition），已上线。
 
@@ -314,10 +314,11 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 | `'/XD', (Join-Path $Source '.freeze'), (Join-Path $Source '.freeze-snap')` | robocopy 排除**只按路径**。快照库路径不匹配就会被整个拷进快照 → 滚雪球。这是手工 junction 被禁的原因 |
 | `function Invoke-RobocopyMirror` | 封装 robocopy；exit ≥16 致命、=8 部分失败继续由哈希校验判定 |
 | `function Remove-OldSnapshots` | 轮转，默认 `-KeepSnapshots 5` |
-| `function Get-Sha256Hex` | 用 `[System.IO.File]::ReadAllBytes` **整文件进内存**——大文件风险，见 DFB-20261005-003 |
+| `function Get-Sha256Hex` | 已改**流式**：`File.Open(..., FileShare.Read)` + `ComputeHash(Stream)`，驻留与文件大小解耦（原 `ReadAllBytes` 整文件进内存）。`FileShare.Read` 保持原打开语义——被独占锁定的文件照旧抛错走 `[漂移-不可读]`（T1 行为不变）。P1 断言用 `Get-FileHash` 第三方参照锁定逐位一致 |
 | `function Get-ProtectedFiles` | 排除 `.freeze` / `.freeze-snap`，用 `-notlike "$Root\.freeze\*"` **前缀**匹配（与 robocopy 精确排除理论分叉，见开放项） |
 | `function Test-SourceScale` | 规模护栏。阈值常量定义在**函数体顶部**（`$FileCountLimit` / `$ByteLimit`），调整只改一处 |
-| `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。**注意内部用 `+=` 在循环里累加数组**（O(N²)），见 DFB-20261005-003 |
+| `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。已 `List[string]` 化——**不再**用 `+=` 在循环里累加（原 O(N²)）。调用方 `restore` / `status` 只用 `.Count`，契约键 `New/Changed/Missing/Total` 不变 |
+| `function Get-Manifest` | 已 `List[object]` 化——**不再**用 `$manifest.files += [ordered]@{...}`（原每次 protect 跑，30k 文件实测 29,113ms → 1,301ms）。`ToArray()` 后入表以保 JSON 形状逐字节不变 |
 | protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
 | `if ($SnapRoot -ne $DefaultSnapRoot`（unprotect -Purge 分支） | 孤儿清理：快照迁共享库后，purge 顺带清**本源**默认位置遗留快照；同 store 其他 srcKey 不碰、actions.log 保留 —— **H8 断言锁定**（评审返工 C1） |
 | `verify.ps1` 里的 `$env:DEEPFREEZE_ALLOWED_ROOT = $Root` | 自检把边界钉到仓库自身，所以每次自检都真实走到该配置路径 |
