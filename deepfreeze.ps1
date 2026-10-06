@@ -203,10 +203,18 @@ function Get-SnapshotManifestPath {
 }
 
 function Get-Sha256Hex {
-  # .NET SHA256 实例复用: 354 文件量级下比逐次 Get-FileHash 快约 4 倍 (0.44s -> 0.10s, 实测)
+  # DFB-20261005-003: 原 ReadAllBytes 把整个文件读进内存 (单文件 N MB 吃 N MB 驻留)。
+  # 改 ComputeHash(Stream) —— 框架内部以固定缓冲分块喂哈希, 驻留与文件大小解耦。
+  # SHA256 规范保证流式与一次性对同一内容结果逐位一致 (verify P1 用 Get-FileHash 参考
+  # 实现双路比对锁定; 改错会让所有既有 manifest 校验全盘误报漂移 = 数据损坏)。
+  # FileShare.Read 与 ReadAllBytes 的打开语义一致: 被独占锁定的文件照旧抛错 →
+  # restore 判 [漂移-不可读] (T1 行为不变)。
+  # 保留 SHA256 实例复用 (原注释事实: 354 文件小文件量级比逐次 Get-FileHash 快约 4 倍,
+  # 0.44s -> 0.10s 实测); 该优势在大单文件场景消失 (瓶颈在 IO), 但实例复用无代价, 保留。
   param([string]$Path, [System.Security.Cryptography.SHA256]$Sha)
-  $bytes = [System.IO.File]::ReadAllBytes($Path)
-  return [System.BitConverter]::ToString($Sha.ComputeHash($bytes)).Replace('-', '')
+  $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+  try { return [System.BitConverter]::ToString($Sha.ComputeHash($stream)).Replace('-', '') }
+  finally { $stream.Dispose() }
 }
 
 function Get-ProtectedFiles {
@@ -265,18 +273,22 @@ function Test-SourceScale {
 function Get-Manifest {
   param([string]$Root)
   $items = Get-ProtectedFiles -Root $Root
-  $manifest = [ordered]@{
-    created = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    files   = @()
-  }
+  $created = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+  # DFB-20261005-003: 原写法 $manifest.files += [ordered]@{...} 每次扩容全量拷贝已有数组,
+  # 30,000 文件实测 29,113ms → List[object] 1,301ms (22.4x, 全卡最大单点耗时, 每次 protect 都跑)。
+  # 两种写法最终驻留相同 (同为完整对象图) —— += 毁的是时间与 GC 压力, 优化理由是时间不是省内存。
+  $fileList = [System.Collections.Generic.List[object]]::new()
   $sha = [System.Security.Cryptography.SHA256]::Create()
   try {
     foreach ($f in $items) {
       $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
-      $manifest.files += [ordered]@{ path = $rel; size = $f.Length; sha256 = (Get-Sha256Hex -Path $f.FullName -Sha $sha) }
+      $fileList.Add([ordered]@{ path = $rel; size = $f.Length; sha256 = (Get-Sha256Hex -Path $f.FullName -Sha $sha) })
     }
   } finally { $sha.Dispose() }
-  return $manifest
+  # ToArray() 后再入表: ConvertTo-Json 对数组的序列化是稳定不动点, 保证 manifest 形状与
+  # 旧实现逐字节一致 (硬约束: 既有 manifest 必须可读, 直接放 List 依赖框架对 IEnumerable
+  # 的序列化路径, 属可避免的兼容性风险)
+  return [ordered]@{ created = $created; files = $fileList.ToArray() }
 }
 
 function Get-Diff {
@@ -290,12 +302,16 @@ function Get-Diff {
     $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
     $cur[$rel] = $f.Length
   }
-  $new = @(); $changed = @(); $missing = @()
+  $new = [System.Collections.Generic.List[string]]::new()
+  $changed = [System.Collections.Generic.List[string]]::new()
+  $missing = [System.Collections.Generic.List[string]]::new()
+  # DFB-20261005-003: 三处 $arr += 每次扩容全量拷贝, 30,000 条实测 20,319ms → List[string] 141ms
+  # (144x)。调用方 restore/status 只用 .Count, 直接返回 List, 输出契约键不变 (verify P2 锁行为)。
   foreach ($p in $manPaths.Keys) {
-    if (-not $cur.ContainsKey($p)) { $missing += $p }
-    elseif ($cur[$p] -ne $manPaths[$p]) { $changed += $p }
+    if (-not $cur.ContainsKey($p)) { $missing.Add($p) }
+    elseif ($cur[$p] -ne $manPaths[$p]) { $changed.Add($p) }
   }
-  foreach ($p in $cur.Keys) { if (-not $manPaths.ContainsKey($p)) { $new += $p } }
+  foreach ($p in $cur.Keys) { if (-not $manPaths.ContainsKey($p)) { $new.Add($p) } }
   return @{ New = $new; Changed = $changed; Missing = $missing; Total = $manPaths.Count }
 }
 
@@ -473,7 +489,16 @@ switch ($Action) {
       $count = '?'
       $mp = Get-SnapshotManifestPath -Ts $ts
       if (Test-Path -LiteralPath $mp) {
-        try { $m = Get-Content -LiteralPath $mp -Raw -Encoding UTF8 | ConvertFrom-Json; $count = @($m.files).Count } catch { }
+        try {
+          # DFB-20261005-003: 只为数个数, 不再全量 ConvertFrom-Json 物化对象图 (30k 条实测
+          # 峰值驻留 48.67MB → ≈0, 6.97x; history 对每个快照都做一遍, 是只读命令却比 protect 吃内存)。
+          # 前提依赖: manifest 是 ConvertTo-Json -Depth 5 的多行缩进格式, 每条目的 path 键独占一行;
+          # 若将来改紧凑单行格式, 此计数法失效。正确性: 值内的引号必被转义为 \" (且 Windows 文件名
+          # 本就禁含 "), 行结构不会被路径内容破坏; 流式只省内存不提速 (30k 条 541ms vs 426ms,
+          # 逐行 -match 有开销), 此处不为提速。
+          $count = 0
+          foreach ($line in [System.IO.File]::ReadLines($mp)) { if ($line -match '"path"\s*:') { $count++ } }
+        } catch { }
       }
       $mark = if ($s -eq $snaps[-1]) { '  <- 最近' } else { '' }
       Write-Host "  $($s.Name)  $count 个文件$mark"

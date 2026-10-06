@@ -15,6 +15,9 @@
   H1~H8 快照根可配 (DFB-20261005-002): 默认落点回归 / 共享库落点 / state.json 持久化 /
         多源 srcKey 隔离不撞名 / 旧 state.json 向后兼容 / store 自动创建 / 护栏不放宽 /
         purge 孤儿清理边界 (返工 C1: 清本源默认位置遗留快照, 不碰他源 srcKey, 留审计日志)
+  P1~P3 manifest 读取优化 (DFB-20261005-003): Get-Manifest List 化后 manifest 形状与哈希
+        逐位不变 (流式哈希 vs Get-FileHash 双路比对) / Get-Diff List 化后漂移分类与 restore
+        全链路不变 / history 流式计数不错数
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -358,6 +361,40 @@ Check 'H8 ②他源 srcKey 存活 (store 剩 1 个 key, 未越界清库)' ($h8Ke
 Check 'H8 ②他源快照数据完好 (keyA 的 2 个 snap 原样)' ((@(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -eq 2)
 Check 'H8 ③actions.log 审计日志保留 (C3 裁定)' (Test-Path -LiteralPath "$HSrcB\.freeze\actions.log")
 Check 'H8 ③日志含孤儿清理记录 (分支执行可追溯)' ((Get-Content -LiteralPath "$HSrcB\.freeze\actions.log" -Raw -ErrorAction SilentlyContinue) -match '同时清理默认位置的遗留快照')
+
+# ---------- P1~P3 manifest 读取优化 (DFB-20261005-003, 追加于 79 项之后, 未改动任何既有断言) ----------
+Write-Host "`n[P系列] Get-Manifest/Get-Diff List 化 + 流式哈希 + history 流式计数"
+Reset-Sandbox
+# 二进制全字节域文件: 锁流式哈希对非文本内容的逐位一致性
+$pBin = New-Object byte[] (256 * 64)
+for ($i = 0; $i -lt $pBin.Length; $i++) { $pBin[$i] = $i % 256 }
+[System.IO.File]::WriteAllBytes((Join-Path $Sandbox 'bin.dat'), $pBin)
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'P1 protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+$pSnaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp' | Sort-Object Name)
+$pTs = $pSnaps[-1].Name -replace '^snap-', ''
+$pMan = Get-Content -LiteralPath "$Sandbox\.freeze\manifests\$pTs.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+Check 'P1 manifest 文件数=4 (a/b/bin.dat/sub\c, List 化不改计数)' (@($pMan.files).Count -eq 4) "实际 $(@($pMan.files).Count)"
+$pA = @($pMan.files | Where-Object { $_.path -eq 'a.txt' })[0]
+$pBinEntry = @($pMan.files | Where-Object { $_.path -eq 'bin.dat' })[0]
+$refA = (Get-FileHash -LiteralPath "$Sandbox\a.txt" -Algorithm SHA256).Hash
+$refBin = (Get-FileHash -LiteralPath "$Sandbox\bin.dat" -Algorithm SHA256).Hash
+Check 'P1 流式哈希与 Get-FileHash 逐位一致 (文本 a.txt)' ($pA.sha256 -ieq $refA) "manifest=$($pA.sha256) ref=$refA"
+Check 'P1 流式哈希与 Get-FileHash 逐位一致 (二进制全字节域 bin.dat)' ($pBinEntry.sha256 -ieq $refBin) "manifest=$($pBinEntry.sha256) ref=$refBin"
+Check 'P1 manifest 条目结构不变 (path,size,sha256 有序三键, 旧版可读性不破)' (((@($pA.PSObject.Properties.Name)) -join ',') -eq 'path,size,sha256') "实际 $(@($pA.PSObject.Properties.Name) -join ',')"
+
+Write-Host '  [P2] Get-Diff List 化: 漂移分类与 restore 全链路不变'
+'changed' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+'drift-new' | Set-Content -LiteralPath "$Sandbox\d.txt" -Encoding UTF8
+Remove-Item -LiteralPath "$Sandbox\b.txt" -Force
+$r = Invoke-Deepfreeze @('status', '-Source', $Sandbox)
+Check 'P2 diff 三类计数正确 (新增 1 / 变更 1 / 被删 1, List 返回契约不变)' ($r.Out -match '新增 1 个 / 内容变更 1 个 / 被删 1 个') $r.Out
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'P2 漂移后 restore 成功 (流式哈希全量校验通过, exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+
+Write-Host '  [P3] history 流式计数不错数'
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'P3 history 流式计数正确 (最新快照 4 个文件)' ($r.Out -match 'snap-\d{8}-\d{6}\s+4 个文件') $r.Out
 
 
 # ---------- 清理 ----------
