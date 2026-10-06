@@ -18,6 +18,10 @@
   P1~P3 manifest 读取优化 (DFB-20261005-003): Get-Manifest List 化后 manifest 形状与哈希
         逐位不变 (流式哈希 vs Get-FileHash 双路比对) / Get-Diff List 化后漂移分类与 restore
         全链路不变 / history 流式计数不错数
+  Q1~Q6 格式守卫 + ForceLarge 空间警告 (DFB-20261006-004): 多行格式不误伤 / 紧凑单行格式
+        (-Compress 形态) 被 history 拒绝且报格式异常 (fail-closed 不回退) / 空 manifest
+        (files=[]) 不被误判 / -ForceLarge 默认落点空间警告出现 / 同卷 -SnapshotRoot 警告
+        不回归 (C2) / 正常 protect 不弹空间警告 (-ForceLarge 专属, 防误报)
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -395,6 +399,52 @@ Check 'P2 漂移后 restore 成功 (流式哈希全量校验通过, exit 0)' ($r
 Write-Host '  [P3] history 流式计数不错数'
 $r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
 Check 'P3 history 流式计数正确 (最新快照 4 个文件)' ($r.Out -match 'snap-\d{8}-\d{6}\s+4 个文件') $r.Out
+
+# ---------- Q1~Q6 格式守卫 + ForceLarge 空间警告 (DFB-20261006-004, 追加于 87 项之后, 未改动任何既有断言) ----------
+Write-Host "`n[Q系列] manifest 格式守卫 (C1) + -ForceLarge 默认落点空间警告 (S1)"
+$QEmpty = Join-Path $Root '_selftest\data-empty'
+if (Test-Path -LiteralPath $QEmpty) { Remove-Item -LiteralPath $QEmpty -Recurse -Force }
+
+Write-Host '  [Q1] 多行格式: history 正常计数 (守卫不误伤)'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+$qSnaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp' | Sort-Object Name)
+$qTs = $qSnaps[-1].Name -replace '^snap-', ''
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'Q1 多行格式 history 正常计数 (exit 0 且 3 个文件, 守卫不误伤)' ($r.Code -eq 0 -and $r.Out -match 'snap-\d{8}-\d{6}\s+3 个文件') "exit=$($r.Code) $($r.Out)"
+
+Write-Host '  [Q2] 紧凑单行格式 (-Compress 形态): 必须被拒, 不静默给错计数'
+# 反向断言是本卡核心: 把真实 manifest 原地改写成 -Compress 形态, history 必须报错而非数成 1
+$qMan = "$Sandbox\.freeze\manifests\$qTs.json"
+$qCompact = Get-Content -LiteralPath $qMan -Raw -Encoding UTF8 | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 5
+[System.IO.File]::WriteAllText($qMan, $qCompact, (New-Object System.Text.UTF8Encoding($true)))
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'Q2 紧凑格式 history 被拒 (exit 非 0, 不静默数成 1)' ($r.Code -ne 0) "exit=$($r.Code) $($r.Out)"
+Check 'Q2 报错含格式异常说明 (fail-closed, 未静默回退全量解析)' ($r.Out -match '格式异常') $r.Out
+
+Write-Host '  [Q3] 空 manifest (files=[] 多行) 不被误判为紧凑格式'
+New-Item -ItemType Directory -Force -Path $QEmpty | Out-Null
+$r = Invoke-Deepfreeze @('protect', '-Source', $QEmpty, '-AutoConfirm')
+Check 'Q3 空目录 protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+$r = Invoke-Deepfreeze @('history', '-Source', $QEmpty)
+Check 'Q3 空 manifest history 正常 (exit 0, 守卫未误判)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'Q3 空 manifest 计数为 0 (输出 0 个文件)' ($r.Out -match '0 个文件') $r.Out
+# Q3 现场自理 (不触碰既有清理段)
+$null = Invoke-Deepfreeze @('unprotect', '-Source', $QEmpty, '-Purge', '-AutoConfirm')
+Remove-Item -LiteralPath $QEmpty -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host '  [Q4] S1: -ForceLarge 默认落点 → 空间警告出现'
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-ForceLarge', '-AutoConfirm')
+Check 'Q4 -ForceLarge 默认落点含空间警告 (快照写满源卷)' ($r.Out -match '源所在卷') $r.Out
+
+Write-Host '  [Q5] C2 回归: -ForceLarge + 同卷 -SnapshotRoot → 仍含空间警告'
+$r = Invoke-Deepfreeze @('protect', '-Source', $gBig, '-ForceLarge', '-SnapshotRoot', $HStore2, '-AutoConfirm')
+Check 'Q5 -ForceLarge + 同卷 SnapshotRoot 仍含空间警告 (C2 不回归)' ($r.Out -match '源所在卷') $r.Out
+
+Write-Host '  [Q6] 不误报对照: 正常 protect (无 ForceLarge) 不得弹空间警告'
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'Q6 正常 protect 无空间警告 (-ForceLarge 专属, 常态噪音会使警告失效)' ($r.Out -notmatch '源所在卷') $r.Out
 
 
 # ---------- 清理 ----------

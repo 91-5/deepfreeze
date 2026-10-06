@@ -319,6 +319,7 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 | `function Test-SourceScale` | 规模护栏。阈值常量定义在**函数体顶部**（`$FileCountLimit` / `$ByteLimit`），调整只改一处 |
 | `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。已 `List[string]` 化——**不再**用 `+=` 在循环里累加（原 O(N²)）。调用方 `restore` / `status` 只用 `.Count`，契约键 `New/Changed/Missing/Total` 不变 |
 | `function Get-Manifest` | 已 `List[object]` 化——**不再**用 `$manifest.files += [ordered]@{...}`（原每次 protect 跑，30k 文件实测 29,113ms → 1,301ms）。`ToArray()` 后入表以保 JSON 形状逐字节不变 |
+| `ConvertTo-Json -Depth 5`（`function Get-Manifest` 内） | **manifest 必须保持多行缩进格式**：`history` 流式计数依赖「`files` 键独占一行」；改成 `-Compress` 会被 `history` 的格式守卫 `throw` 拒绝（fail-closed，DFB-20261006-004，Q 系断言锁定）。空 manifest（`"files": []`）同样命中哨兵行，不误判 |
 | protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
 | `if ($SnapRoot -ne $DefaultSnapRoot`（unprotect -Purge 分支） | 孤儿清理：快照迁共享库后，purge 顺带清**本源**默认位置遗留快照；同 store 其他 srcKey 不碰、actions.log 保留 —— **H8 断言锁定**（评审返工 C1） |
 | `verify.ps1` 里的 `$env:DEEPFREEZE_ALLOWED_ROOT = $Root` | 自检把边界钉到仓库自身，所以每次自检都真实走到该配置路径 |

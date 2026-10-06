@@ -133,8 +133,17 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 # + G1~G6 规模护栏（边界根/盘根/超文件数/超字节被拒、-ForceLarge 逃生留痕、正常目录不误杀）
 # + H1~H7 快照根可配（默认落点回归 / 共享库落点 / state.json 持久化 / 多源 srcKey 隔离 /
 #   旧 state.json 向后兼容 / store 自动创建 / 护栏不因 -SnapshotRoot 放宽）
-# PASS = exit 0（断言总数见脚本尾部输出：39 项基线 + 13 项 G 系 + H 系快照根断言）
+# + P1~P3 manifest 性能改造（List 化后形状与哈希逐位不变 / diff 分类不变 / history 流式计数）
+# + Q1~Q6 格式守卫 + ForceLarge 空间警告（紧凑单行格式被 history 拒绝报"格式异常" /
+#   空 manifest 不误判 / -ForceLarge 默认落点空间警告 / 同卷 -SnapshotRoot 警告不回归 /
+#   正常 protect 不弹空间警告）
+# PASS = exit 0（断言总数见脚本尾部输出：39 项基线 + 13 项 G 系 + H/P/Q 系断言）
 ```
+
+> ⚠ **开发者约束**：manifest 必须保持 `ConvertTo-Json -Depth 5` 的**多行缩进格式**——
+> `history` 的流式计数依赖「`files` 键独占一行」。改成 `-Compress` 后 `history` 会直接
+> `throw`「manifest 格式异常」（fail-closed，不会静默给出错误计数）；两种出路见该报错信息，
+> 并同步更新 verify 的 Q 系断言与本文档此条。
 
 ## 已知边界（这能做什么 / 不能做什么，请如实理解）
 

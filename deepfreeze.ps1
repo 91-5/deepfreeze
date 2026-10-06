@@ -361,9 +361,19 @@ switch ($Action) {
     if ($SnapshotRoot) {
       Write-Warning "快照根: 本次快照写入指定存储 $SnapRoot (源: $Source; 快照不再落在源目录内)"
       # 返工 C2 (评审 Q4): 同卷组合第三重明示 —— 护栏只判源规模, -ForceLarge 放行后
-      # 快照仍完整落在源所在卷, 约·占同等容量, 用户必须知情
+      # 快照仍完整落在源所在卷, 约占同等容量, 用户必须知情
       if ($ForceLarge -and ([System.IO.Path]::GetPathRoot($SnapRoot) -ieq [System.IO.Path]::GetPathRoot($Source))) {
         Write-Warning "-ForceLarge + -SnapshotRoot 为同卷组合: 快照仍写入源所在卷 ($([System.IO.Path]::GetPathRoot($Source))), 将额外占用约与源同等容量, 请确认该卷剩余空间"
+      }
+    }
+    else {
+      # S1 (DFB-20261006-004): -ForceLarge + 默认落点 —— <Source>\.freeze-snap 天然同卷,
+      # 快照仍完整写满源卷, 而既有 ForceLarge 警告只说「越过护栏」不含空间提示 (C2 只覆盖了
+      # 传 -SnapshotRoot 的那一半)。刻意独立分支而非塞进上面的 if ($SnapshotRoot):
+      # 不传参数时那个分支永远走不到。且必须 -ForceLarge 专属 —— 正常 protect 不弹空间
+      # 警告, 常态化噪音会让警告失效 (verify Q6 断言锁定此约束)。
+      if ($ForceLarge) {
+        Write-Warning "-ForceLarge + 默认快照落点: 快照将写入源所在卷 ($DefaultSnapRoot), 将额外占用约与源同等容量, 请确认该卷剩余空间"
       }
     }
     $state = Get-State
@@ -489,13 +499,30 @@ switch ($Action) {
       $count = '?'
       $mp = Get-SnapshotManifestPath -Ts $ts
       if (Test-Path -LiteralPath $mp) {
+        # 格式守卫 (DFB-20261006-004, 003 的 condition C1): 流式计数前提 = ConvertTo-Json
+        # -Depth 5 的多行缩进格式。哨兵判据 = 行首 "files": 键行 —— 多行格式下该键恒独占一行
+        # (空 manifest 的 "files": [], 同样命中, 不误判); 紧凑单行格式 (-Compress) 整份只有
+        # 一行且以 { 开头, 锚点必不命中。未命中 → throw 拒绝计数: 刻意**不**回退
+        # ConvertFrom-Json —— 回退会让「格式变了」这件事继续静默 (fail-closed, 同边界宁严勿宽)。
+        # 比「首行闭合迹象」「匹配数/总行数比例」两候选判据更稳: 后者会在 0 文件空 manifest 上误判。
+        $fmtOk = $false
+        foreach ($line in [System.IO.File]::ReadLines($mp)) {
+          if ($line -match '^\s*"files"\s*:') { $fmtOk = $true; break }
+        }
+        if (-not $fmtOk) {
+          throw @(
+            "manifest 格式异常, history 已拒绝计数: $mp",
+            "检测到紧凑单行格式 (疑似 ConvertTo-Json -Compress), 流式逐行计数不适用, 静默回退会掩盖格式变更。",
+            "两种出路: ① 把 Get-Manifest 的序列化改回 ConvertTo-Json -Depth 5 多行格式 (现状约定, 见 AGENTS.md);",
+            "② 若确需紧凑格式, 必须同步把 history 计数改回全量解析, 并更新 verify 的格式守卫断言 (Q 系列)。"
+          ) -join "`n"
+        }
         try {
           # DFB-20261005-003: 只为数个数, 不再全量 ConvertFrom-Json 物化对象图 (30k 条实测
           # 峰值驻留 48.67MB → ≈0, 6.97x; history 对每个快照都做一遍, 是只读命令却比 protect 吃内存)。
-          # 前提依赖: manifest 是 ConvertTo-Json -Depth 5 的多行缩进格式, 每条目的 path 键独占一行;
-          # 若将来改紧凑单行格式, 此计数法失效。正确性: 值内的引号必被转义为 \" (且 Windows 文件名
-          # 本就禁含 "), 行结构不会被路径内容破坏; 流式只省内存不提速 (30k 条 541ms vs 426ms,
-          # 逐行 -match 有开销), 此处不为提速。
+          # 正确性: 值内的引号必被转义为 \" (且 Windows 文件名本就禁含 "), 行结构不会被路径内容
+          # 破坏; 流式只省内存不提速 (30k 条 541ms vs 426ms, 逐行 -match 有开销), 此处不为提速。
+          # 格式前提由上方守卫强制, 不再依赖口头约定。
           $count = 0
           foreach ($line in [System.IO.File]::ReadLines($mp)) { if ($line -match '"path"\s*:') { $count++ } }
         } catch { }
