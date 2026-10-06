@@ -156,6 +156,21 @@ python D:\15812\projects\agent-covenant\tools\gate.py --verdict-dir verdicts    
 python D:\15812\projects\agent-covenant\tools\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json
 ```
 
+#### ⚠️ 退出码必须直读，**禁止经管道**（评审 A2）
+
+```powershell
+# ❌ 错：管道会吞掉真实退出码，把 FAIL 伪装成 PASS
+python gate.py ... | Select-Object -Last 1     # $LASTEXITCODE 变成 Select 的退出码
+cmd /c "xxx & echo EXITCODE=%ERRORLEVEL%"      # %ERRORLEVEL% 在解析期展开，取到上一条的值
+
+# ✅ 对：单独跑，退出码直读
+python gate.py ...; "GATE_EXIT=$LASTEXITCODE"
+```
+
+**实测两次踩坑**（同一根因，互相独立）：DFB-20261006-004 实现方用 `| tail` 导致报出 `GATE2_EXIT=0`（真实为 1，FAIL）；同轮评审方用 `cmd & echo %ERRORLEVEL%` 同样误显 0。**两次都靠人工察觉**——若无人复核，一个 FAIL 会以 PASS 的面目进git。
+
+**纪律**：门禁与 `verify.ps1` 的退出码**单独一条命令跑**，输出用 `Select-String` 过滤可以，但不能把退出码那一段接进管道。
+
 #### ⚠️ gate.py 必须查**两个** verdict 目录
 
 `--verdict-dir` 只接受**单个**目录，而本项目的 verdict 分两处：
@@ -223,14 +238,13 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 
 ### 进行中
 
-| 卡 | 状态 | 内容 |
-|---|---|---|
-| `DFB-20261006-004` | `IN_REVIEW` | manifest 格式守卫（C1）+ `-ForceLarge` 默认落点空间警告（S1）。ZCode 交付 `8a12539`，主控已独立复核（96/96 PASS、护栏零触碰、**手工造紧凑 manifest 反向验证被拒**、空 manifest 边界实证），待 AgnesCode 评审 |
+**无。** `.tasks\` 活跃区为空，`verdicts\` 为空。
 
 **已归档上线**（卡与verdict 成对移入 `.tasks\archive\`）：
 
 | 卡 | 内容 | commit |
 |---|---|---|
+| `DFB-20261006-004` | manifest 格式守卫（C1）+ `-ForceLarge` 默认落点空间警告（S1） | `8a12539` |
 | `DFB-20261005-003` | manifest 内存/时间优化四处（`List` 化 + 流式哈希 + 流式计数） | `7ccbd10` |
 | `DFB-20261005-002` | `-SnapshotRoot` 快照存储位置可配 | `d5c03ef` |
 | `DFB-20261004-001` | protect 规模护栏 | — |
@@ -326,6 +340,7 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 | `function Get-Manifest` | 已 `List[object]` 化——**不再**用 `$manifest.files += [ordered]@{...}`（原每次 protect 跑，30k 文件实测 29,113ms → 1,301ms）。`ToArray()` 后入表以保 JSON 形状逐字节不变 |
 | `history` 的格式哨兵（流式计数前） | 判据 = **行首 `"files":` 键行**。多行缩进格式下该键恒独占一行；紧凑单行（`-Compress`）整份只有一行且以 `{` 开头 → 锚点必不命中 → **`throw`（fail-closed，不静默回退全量解析）**。⚠️ PS 5.1 把空数组输出成 `"files": [` / 空行 / `]` **三行**，哨兵命中的是第一行，**因此不依赖 `[]` 是否同行** |
 | `ConvertTo-Json -Depth 5`（`function Get-Manifest` 内） | **manifest 必须保持多行缩进格式**：`history` 流式计数依赖「`files` 键独占一行」；改成 `-Compress` 会被 `history` 的格式守卫 `throw` 拒绝（fail-closed，DFB-20261006-004，Q 系断言锁定）。空 manifest（`"files": []`）同样命中哨兵行，不误判 |
+| **manifest 键名锁定 `created` / `files`**（评审 A1） | `history` 的格式哨兵锚在行首 `"files":` 键行。**若将来 `Get-Manifest` 改输出键名（如 `files`→`entries`）而不同步哨兵，合法多行 manifest 会被误判成紧凑格式而 `throw`**（实测 `guard=False, count=1`，静默失效）。改键名必须同步：`Get-Manifest` 输出 + 哨兵判据 + Q 系断言 + 本行 |
 | protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
 | `if ($SnapRoot -ne $DefaultSnapRoot`（unprotect -Purge 分支） | 孤儿清理：快照迁共享库后，purge 顺带清**本源**默认位置遗留快照；同 store 其他 srcKey 不碰、actions.log 保留 —— **H8 断言锁定**（评审返工 C1） |
 | `verify.ps1` 里的 `$env:DEEPFREEZE_ALLOWED_ROOT = $Root` | 自检把边界钉到仓库自身，所以每次自检都真实走到该配置路径 |
