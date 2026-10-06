@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**87 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**96 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造，+ 9 项 Q 系格式守卫与 ForceLarge 空间警告）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,9 +26,9 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (87 项断言)** EXITCODE=0 |
-| `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (0 warnings)** |
-| `gate.py` | `python ...\gate.py --verdict-dir .tasks\archive --artifact-map artifacts.json` | **PASS (3 checked: 1 PASS + 2 SUPERSEDED 不阻塞)** |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (96 项断言)** EXITCODE=0 |
+| `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (1 warning)** — 活跃卡无 verdict，正常 |
+| `gate.py` | 见下方「两目录」说明（**两目录各跑一次**） | 活跃区 PASS(0) /归档区随 verdict 状态变化 |
 
 三仓库并行开发时的冲突面见文末。
 
@@ -225,10 +225,15 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 
 | 卡 | 状态 | 内容 |
 |---|---|---|
-| `DFB-20261005-002` | `IN_REVIEW` | `-SnapshotRoot` 快照存储位置可配。ZCode 交付 `d5c03ef`，主控已独立复核（72/72 PASS、护栏未动），待 AgnesCode 评审 |
-| `DFB-20261005-003` | `IN_REVIEW` | manifest 内存/时间优化四处。ZCode 交付 `7ccbd10`，主控已独立复核（87/87 PASS、护栏零触碰、哈希第三方比对逐位一致），待 AgnesCode 评审 |
+| `DFB-20261006-004` | `IN_REVIEW` | manifest 格式守卫（C1）+ `-ForceLarge` 默认落点空间警告（S1）。ZCode 交付 `8a12539`，主控已独立复核（96/96 PASS、护栏零触碰、**手工造紧凑 manifest 反向验证被拒**、空 manifest 边界实证），待 AgnesCode 评审 |
 
-**最近完成**：`DFB-20261004-001`（protect 规模护栏）— verdict `PASS`（round 2，0 blocker + 0 condition），已上线。
+**已归档上线**（卡与verdict 成对移入 `.tasks\archive\`）：
+
+| 卡 | 内容 | commit |
+|---|---|---|
+| `DFB-20261005-003` | manifest 内存/时间优化四处（`List` 化 + 流式哈希 + 流式计数） | `7ccbd10` |
+| `DFB-20261005-002` | `-SnapshotRoot` 快照存储位置可配 | `d5c03ef` |
+| `DFB-20261004-001` | protect 规模护栏 | — |
 
 ### 留作后续 EVO 的开放项
 
@@ -236,7 +241,7 @@ verdicts\                    ← 活跃卡的 verdict 落点（当前为空）
 |---|---|---|
 | 排除语义统一 | `Get-ProtectedFiles` 用 `-notlike "$Root\.freeze\*"`（**前缀**匹配）vs robocopy `/XD`（**路径精确**排除）。理论分叉仅在 `.freezeX` 这类恰好前缀命中的目录名，实际场景不存在 | 评审维度 5 |
 | verify 降本 | `verify.ps1` 每次跑写 5001 文件 + ~525MB，墙钟 **~72s**，相对秒级基线是数量级退化。判定可接受，建议改稀疏文件/不落盘构造 | 评审维度 6 |
-| **S1**（DFB-20261005-002 后续） | `-ForceLarge` 不传 `-SnapshotRoot` 时（默认落点 `<Source>\.freeze-snap` 天然同卷）无「正在吃满源卷」空间警告。C2 已覆盖 `-SnapshotRoot` 同卷路径，但默认落点未补。建议一行 `Write-Warning` 补齐。**预存缺口，非本卡引入，不阻塞** | R2 评审 S1 |
+| ~~**S1**（DFB-20261005-002 后续）~~ | ✅ **已于 DFB-20261006-004 落实**：`-ForceLarge` 不传 `-SnapshotRoot` 时的默认落点空间警告，Q4 断言锁定（含 Q6 防误报对照） |
 
 （原先第三项「verdict 新鲜度」已于 2026-10-05 修复，见「当前基线」下的小节。）
 
@@ -319,6 +324,7 @@ DFB-002 若需重签 verdict，schema 必须与当前 covenant 一致。
 | `function Test-SourceScale` | 规模护栏。阈值常量定义在**函数体顶部**（`$FileCountLimit` / `$ByteLimit`），调整只改一处 |
 | `function Get-Diff` | 基于 size 的快速 diff（权威判定仍是 restore 后的哈希校验）。已 `List[string]` 化——**不再**用 `+=` 在循环里累加（原 O(N²)）。调用方 `restore` / `status` 只用 `.Count`，契约键 `New/Changed/Missing/Total` 不变 |
 | `function Get-Manifest` | 已 `List[object]` 化——**不再**用 `$manifest.files += [ordered]@{...}`（原每次 protect 跑，30k 文件实测 29,113ms → 1,301ms）。`ToArray()` 后入表以保 JSON 形状逐字节不变 |
+| `history` 的格式哨兵（流式计数前） | 判据 = **行首 `"files":` 键行**。多行缩进格式下该键恒独占一行；紧凑单行（`-Compress`）整份只有一行且以 `{` 开头 → 锚点必不命中 → **`throw`（fail-closed，不静默回退全量解析）**。⚠️ PS 5.1 把空数组输出成 `"files": [` / 空行 / `]` **三行**，哨兵命中的是第一行，**因此不依赖 `[]` 是否同行** |
 | `ConvertTo-Json -Depth 5`（`function Get-Manifest` 内） | **manifest 必须保持多行缩进格式**：`history` 流式计数依赖「`files` 键独占一行」；改成 `-Compress` 会被 `history` 的格式守卫 `throw` 拒绝（fail-closed，DFB-20261006-004，Q 系断言锁定）。空 manifest（`"files": []`）同样命中哨兵行，不误判 |
 | protect 分支的 `.tmp` → `Move-Item` | 原子提交：先拷 `.tmp`，全成功才 rename 成 `snap-<ts>` |
 | `if ($SnapRoot -ne $DefaultSnapRoot`（unprotect -Purge 分支） | 孤儿清理：快照迁共享库后，purge 顺带清**本源**默认位置遗留快照；同 store 其他 srcKey 不碰、actions.log 保留 —— **H8 断言锁定**（评审返工 C1） |
