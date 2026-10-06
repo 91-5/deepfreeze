@@ -5,8 +5,15 @@
     "DFB-20261004-001": "AGENTS.md is deliberately NOT listed. It is in the card's Owned files (D4 assigned the guard section to the implementer), but the only post-verdict edits were orchestrator bookkeeping unrelated to the guard (session-boundary section, baseline numbers, cf54b98). Listing it would report STALE on noise. If the guard section of AGENTS.md changes, re-review rather than re-map.",
     "excluded_by_design": ".gitignore is not listed for DFB-20261004-001 even though condition C1 touched it: the change was made by the orchestrator (adcd846) before the verdict, and .gitignore is not a source artifact any verdict conclusion depends on.",
     "DFB-20261005-002": "AGENTS.md not listed for the same reason: the card limited it to the junction-prohibition section, and the only other change there was orchestrator baseline upkeep. The reviewer (AgnesCode) judged exactly deepfreeze.ps1 / verify.ps1 / README.md / AGENTS.md-junction-section; the first three are what any verdict conclusion depends on.",
-    "DFB-20261005-003": "AGENTS.md deliberately not listed: the card forbade touching docs, and the reviewer explicitly declined to modify author files (all AGENTS.md staleness is orchestrator-owned). The two listed source files are what every conclusion here depends on -- including the P1 hash-consistency assertion."
+    "DFB-20261005-003": "AGENTS.md deliberately not listed: the card forbade touching docs, and the reviewer explicitly declined to modify author files (all AGENTS.md staleness is orchestrator-owned). The two listed source files are what every conclusion here depends on -- including the P1 hash-consistency assertion.",
+    "DFB-20261006-004": "README.md IS listed. My first pass omitted it, which left four older verdicts stuck reporting STALE on README with no successor able to claim it -- the guard works, but the map has to name every artifact a card actually touched. The AGENTS.md line added by this card stays excluded: a single documentation row is orchestrator bookkeeping, not a conclusion any gate depends on."
   },
+
+  "DFB-20261006-004": [
+    "deepfreeze.ps1",
+    "verify.ps1",
+    "README.md"
+  ],
 
   "DFB-20261005-003": [
     "deepfreeze.ps1",
