@@ -46,6 +46,12 @@ $env:DEEPFREEZE_ALLOWED_ROOT = "C:\你的项目根"
 # 之后对该源的 protect 即使不带 -SnapshotRoot 也会继续落同一位置（显式传参可随时改）。
 # 不传 -SnapshotRoot 时行为与旧版完全一致：<Source>\.freeze-snap。
 
+# 保护 + 绑定任务卡号（-Card，融合期 1，DFB-20261019-001）
+# 快照提交成功后写 <Source>\.freeze\link-<卡号>.json，供 agent-covenant 门禁（期 2）读取。
+# 卡号须匹配 ^[A-Z]{2,6}-\d{8}-\d{3}$（如 DFB-20261019-001），否则 fail-closed 拒绝且零副作用。
+# 不带 -Card 时行为与旧版逐位一致（完全不碰 link 目录）。
+.\deepfreeze.ps1 protect -Source "C:\某个项目" -AllowedRoot "C:\" -Card "DFB-20261019-001" -AutoConfirm
+
 # 查看状态（含快照后变更 diff 预览）
 .\deepfreeze.ps1 status -Source "<你的目录>"
 
@@ -82,6 +88,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 <Source>\
 ├─ .freeze\                        # state.json + actions.log
 │  ├─ manifests\<ts>.json          # 每个快照的 SHA256 清单（集中存放，按 ts 一一对应）
+│  ├─ link-<卡号>.json              # 卡↔快照绑定（protect -Card 写入，融合期 1）
 │  └─ prerestore-*\                # restore 前自动备份（默认保留最近 3 份，-KeepBackups 可调）
 └─ .freeze-snap\
    ├─ snap-<yyyyMMdd-HHmmss>\      # 快照镜像（每次 protect 新增一个，不覆盖）
@@ -108,6 +115,36 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 清单**刻意不放进快照目录**：restore 的 `robocopy /MIR` 源是快照目录，清单若在其中会被
 原样拷回源根（自我污染，实测复现过的 bug），且快照越多泄漏越多。清单移到 `.freeze\manifests\`
 后该目录已在 `/XD` 排除列表内，双向干净。
+
+## 与 agent-covenant 的衔接（期 1）
+
+deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**——建立「任务卡 ↔ 快照」绑定，
+使任意卡号能查到开卡前的快照。两仓各写各的字段，**零代码耦合**（不 import、不互相调用）。
+
+`protect -Card <卡号>` 成功后写 `<Source>\.freeze\link-<卡号>.json`（`.freeze\` 已被本仓
+`.gitignore` 排除，且在 robocopy `/XD` 排除列表内，**不会**被拷进快照）：
+
+| 字段 | 含义 |
+|---|---|
+| `card` | 卡号（与文件名一致） |
+| `snap_ts` | 本次快照时间戳（`yyyyMMdd-HHmmss`） |
+| `snap_path` | 快照目录**绝对路径**（共享库模式下在源目录外，故记绝对路径） |
+| `snapshot_root` | 本次实际使用的快照根 |
+| `source` | 被保护的源目录 |
+| `created_at` | 写入时刻 `yyyy-MM-dd HH:mm:ss` |
+
+- **写入时机**：快照提交成功、`state.json` 落盘之后，快照轮转之前。
+- **重复 protect 语义**：同卡号第二次 `protect -Card` 覆盖同一文件的 `snap_*` 字段（最新快照胜出），
+  `created_at` 同步更新；不报错、不追加历史。
+- **不带 `-Card`**：完全不碰 link 目录，行为与旧版逐位一致（兼容性红线）。
+- **卡号校验**：须匹配 `^[A-Z]{2,6}-\d{8}-\d{3}$`，否则 `throw` 拒绝（fail-closed，校验排在
+  任何写操作之前，拒绝时源目录零副作用）。
+- **回滚安全隔离（D3）**：快照轮转删除旧快照**目录**时，若某 `link-*.json` 仍引用其 `snap_ts`，
+  该快照的 **manifest 跳过删除**（目录与清单解耦，清单仅数 KB，保住门禁回滚所需清单）。
+  若 link 文件损坏（非法 JSON / 缺 `snap_ts`），按 **fail-closed** 保守处理：**不删任何 manifest**。
+
+期 2（covenant 门禁读 link 校验）、期 3（派卡自动 protect）、期 4（FAIL 自动回滚）**均未实现**，
+不在本工具范围。
 
 ## 安全设计
 
@@ -137,7 +174,10 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 # + Q1~Q6 格式守卫 + ForceLarge 空间警告（紧凑单行格式被 history 拒绝报"格式异常" /
 #   空 manifest 不误判 / -ForceLarge 默认落点空间警告 / 同卷 -SnapshotRoot 警告不回归 /
 #   正常 protect 不弹空间警告）
-# PASS = exit 0（断言总数见脚本尾部输出：39 项基线 + 13 项 G 系 + H/P/Q 系断言）
+# + C1~C9 卡号绑定（protect -Card 合法卡号写 link / link 字段完整且 snap_path 绝对路径真实存在 /
+#   非法卡号 fail-closed 且零副作用 / 不带 -Card 不产 link / 同卡重复 protect 覆盖 snap 字段 /
+#   轮转不删被引用 manifest / 共享库模式 link 落源目录 / link 不进快照 / 非 protect 子命令带 -Card 不报错）
+# PASS = exit 0（断言总数见脚本尾部输出：96 项基线 + 37 项 C 系断言 = 133 项）
 ```
 
 > ⚠ **开发者约束**：manifest 必须保持 `ConvertTo-Json -Depth 5` 的**多行缩进格式**——
@@ -160,6 +200,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 5. **不是开机自动还原、也不是自动保护**——protect 与 restore 都由你**主动触发**；
    无计划任务常驻、无注册表自启、无文件监听、无 hook 拦截、无驱动级拦截。
    **「agent 一动手就自动打快照」这个形态目前不存在**，是被保护目录内手动管理快照的工具。
+   触发仍为手动，但 `protect` 支持 `-Card` 记录「卡 ↔ 快照」绑定（融合期 1，期 2/3/4 未实现）。
 6. **不防多时间点之间的外部状态漂移**——只认文件内容，不认「世界」。
 
 若将来确实需要「真·冰点」：唯一现实的下一阶段是 Hyper-V 差分磁盘 checkpoint
@@ -172,6 +213,7 @@ protect 采用**先写临时目录、成功后原子 rename** 的提交方式—
 1. **接入 agent hook —— 危险操作前自动 protect**。这是把本项目从「手动工具」变成
    「agent 基础设施」的关键一步，也是与 `agent-undo` / `agent-rollback` 类工具的差异点。
    现状：**完全没有**，需要宿主（如 OpenCode）在写操作前暴露 hook 点。
+   **部分前置已就绪：link 绑定已落地（期 1，`protect -Card`），期 2 门禁读 link 待实现。**
 2. **Linux/macOS 支持**——需重写文件操作层（去掉 `robocopy` 依赖），成本高，优先级低。
 3. **条件触发快照**（如「目录变更超过 N 个文件时自动 protect」）——仍缺文件监听层。
 

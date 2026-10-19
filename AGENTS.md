@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**96 项断言**（39 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造，+ 9 项 Q 系格式守卫与 ForceLarge 空间警告）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**133 项断言**（96 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造，+ 9 项 Q 系格式守卫与 ForceLarge 空间警告，+ 37 项 C 系卡号绑定与 link 文件）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,7 +26,7 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (96 项断言)** EXITCODE=0 |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (133 项断言)** EXITCODE=0 |
 | `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (1 warning)** — 活跃卡无 verdict，正常 |
 | `gate.py` | 见下方「两目录」说明（**两目录各跑一次**） | 活跃区 PASS(0) /归档区随 verdict 状态变化 |
 
@@ -129,6 +129,10 @@ git branch -vv
 ```
 
 `-Source` **必须命名传参**，不能依赖默认值。`-AutoConfirm` 跳过交互确认。
+
+> 开卡实现时，protect 可加 `-Card <卡号>`（如 `DFB-20261019-001`）写入 `<Source>\.freeze\link-<卡号>.json`，
+> 建立「卡 ↔ 快照」绑定，供 covenant 门禁（期 2）读取（融合期 1，DFB-20261019-001）。
+> 卡号须匹配 `^[A-Z]{2,6}-\d{8}-\d{3}$`，否则 fail-closed 拒绝；不带 `-Card` 行为与旧版逐位一致。
 
 > 本项目自身已有 `.freeze` 快照（2026-10-05 起，ZCode 按纪律开工前打的基线）。**动 `deepfreeze.ps1` / `verify.ps1` 之前先确认有可用快照**：`.\deepfreeze.ps1 history -Source "$PWD"`。
 

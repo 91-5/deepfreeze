@@ -63,10 +63,22 @@ param(
   # 从 .freeze\state.json 的 snapshot_root 字段读回实际位置(旧 state.json 无该字段则回落默认)。
   [string]$SnapshotRoot,
 
+  # 任务卡号绑定 (DFB-20261019-001, 融合期 1): 仅 protect 接收, 其余子命令忽略(与 -SnapshotRoot 同策略)。
+  # protect 快照提交成功 + state.json 落盘之后写 <Source>\.freeze\link-<Card>.json,
+  # 把「卡 ↔ 快照」绑定落盘供 covenant 门禁(期 2)读取。卡号必须匹配 ^[A-Z]{2,6}-\d{8}-\d{3}$
+  # (如 DFB-20261019-001), 否则 throw —— fail-closed, 不接受任意字符串当卡号;
+  # 校验排在 protect 任何写操作(含 New-Item/robocopy)之前, 非法卡号拒绝时源目录零副作用。
+  # 不带 -Card: 完全不碰 link 目录, 行为与旧版逐位一致(兼容性红线)。
+  [string]$Card,
+
   [switch]$AutoConfirm
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 是否显式传入 -Card (DFB-20261019-001): 用 $PSBoundParameters 区分「未传」与「传了值」,
+# 未传(含未绑定 → $Card 为空串)时一律不校验、不写 link; 校验只在 protect 分支进行。
+$cardProvided = $PSBoundParameters.ContainsKey('Card')
 
 # 安全边界解析。刻意 fail-closed: 拿不到边界就拒绝启动, 不猜一个宽边界兜底——
 # 边界配置错了应该「拒绝服务」, 而不是「默默放开到整盘」。
@@ -338,16 +350,50 @@ function Remove-OldBackups {
   }
 }
 
+function Get-LinkedSnapTs {
+  # 回滚安全隔离 (DFB-20261019-001, D3): 收集被任一 link-*.json 引用的 snap_ts, 供轮转跳过 manifest 删除。
+  # 返回 @{ BlockAll = <bool>; Ts = <HashSet[string] 或 $null> }:
+  #   BlockAll=$true  → 坏 link(非法 JSON / 缺 snap_ts / 读失败), 无法确知引用关系,
+  #                     按 fail-closed 保守方案视为「引用全部快照」= 不删任何 manifest。
+  #   BlockAll=$false + Ts=$null → 无 link(或无 .freeze), 与旧版逐位一致 = 正常删清单。
+  #   BlockAll=$false + Ts=集合 → 仅这些 ts 跳过 manifest 删除。
+  # 不能只用 $null 表达「坏 link」: 那会与「无 link」混同, 把 fail-closed 退化成正常删除(反了)。
+  $result = @{ BlockAll = $false; Ts = $null }
+  if (-not (Test-Path -LiteralPath $StateDir)) { return $result }
+  $linkFiles = @(Get-ChildItem -LiteralPath $StateDir -File -Filter 'link-*.json' -ErrorAction SilentlyContinue)
+  if ($linkFiles.Count -eq 0) { return $result }
+  $set = [System.Collections.Generic.HashSet[string]]::new()
+  foreach ($lf in $linkFiles) {
+    try {
+      $obj = Get-Content -LiteralPath $lf.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($obj.PSObject.Properties['snap_ts'] -and $obj.snap_ts) { $null = $set.Add([string]$obj.snap_ts) }
+      else { Write-Warning "link 文件缺 snap_ts, 按 fail-closed 保守处理(不删任何清单): $($lf.Name)"; return @{ BlockAll = $true; Ts = $null } }
+    } catch {
+      Write-Warning "link 文件解析失败, 按 fail-closed 保守处理(不删任何清单): $($lf.Name)"
+      return @{ BlockAll = $true; Ts = $null }
+    }
+  }
+  $result.Ts = $set
+  return $result
+}
+
 function Remove-OldSnapshots {
-  # 快照按时间戳名升序, 最旧的排最前; 超出 $KeepSnapshots 的最旧快照连同其清单一起删
+  # 快照按时间戳名升序, 最旧的排最前; 超出 $KeepSnapshots 的最旧快照连同其清单一起删。
+  # D3 (DFB-20261019-001): 快照目录删除逻辑不变; 但被 link-*.json 引用的快照, 其 manifest 跳过删除
+  # (目录与清单解耦后, 清单仅数 KB; 保住 covenant 门禁回滚所需的清单)。坏 link 时 BlockAll 一票保全部。
   $snaps = Get-Snapshots
   $excess = $snaps.Count - $KeepSnapshots
   if ($excess -gt 0) {
+    $linked = Get-LinkedSnapTs
     $snaps | Select-Object -First $excess | ForEach-Object {
       Remove-Item -LiteralPath $_.FullName -Recurse -Force
       $ts = $_.Name -replace '^snap-', ''
-      Remove-Item -LiteralPath (Get-SnapshotManifestPath -Ts $ts) -Force -ErrorAction SilentlyContinue
-      Write-Log "  清理旧快照: $($_.Name)"
+      if ($linked.BlockAll -or ($null -ne $linked.Ts -and $linked.Ts.Contains($ts))) {
+        Write-Log "  清理旧快照: $($_.Name) (清单被 link 引用, 跳过 manifest 删除)"
+      } else {
+        Remove-Item -LiteralPath (Get-SnapshotManifestPath -Ts $ts) -Force -ErrorAction SilentlyContinue
+        Write-Log "  清理旧快照: $($_.Name)"
+      }
     }
   }
 }
@@ -355,6 +401,12 @@ function Remove-OldSnapshots {
 switch ($Action) {
 
   'protect' {
+    # -Card 校验 (DFB-20261019-001, fail-closed): 显式传入但不匹配卡号正则即 throw。
+    # 必须排在规模护栏与任何写操作(New-Item / robocopy)之前 —— 非法卡号拒绝时源目录零副作用。
+    # -notmatch 对空串返回 $true, 故传了空串也会被拒(空串无法与「未传」混同: 未传时 $cardProvided 为 $false)。
+    if ($cardProvided -and ($Card -notmatch '^[A-Z]{2,6}-\d{8}-\d{3}$')) {
+      throw "非法卡号: '$Card'。要求匹配 ^[A-Z]{2,6}-\d{8}-\d{3}$ (例: DFB-20261019-001), 已拒绝 (fail-closed)。"
+    }
     # 规模护栏必须先于一切写操作(含下面 New-Item 建目录)执行, 拒绝时源目录零副作用
     Test-SourceScale -Root $Source
     # 共享库模式下在写之前明示实际落点 (卡 D2: 显式传参 + Write-Warning 记录, 不做路径边界校验)
@@ -415,6 +467,22 @@ switch ($Action) {
       snapshot_root = $SnapRoot
     }
     ($newState | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding UTF8
+    # 卡 ↔ 快照绑定 (DFB-20261019-001, D2): 在快照提交成功 + state.json 落盘之后、轮转之前写入。
+    # [ordered] + ConvertTo-Json 与 state.json 风格一致; snap_path 记快照目录绝对路径
+    # (共享库模式下在源目录外, 必须绝对)。同卡号二次 protect 覆盖同一文件(最新快照胜出, 不追加历史);
+    # 文件名中的卡号已过上方正则(无路径分隔符注入面), 但仍用 -LiteralPath 操作。
+    if ($cardProvided) {
+      $linkFile = Join-Path $StateDir "link-$Card.json"
+      $link = [ordered]@{
+        card          = $Card
+        snap_ts       = $ts
+        snap_path     = $snapTarget
+        snapshot_root = $SnapRoot
+        source        = $Source
+        created_at    = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+      }
+      ($link | ConvertTo-Json) | Set-Content -LiteralPath $linkFile -Encoding UTF8
+    }
     Remove-OldSnapshots
     Write-Log "protect 完成: $($manifest.files.Count) 个文件入快照 snap-$ts"
   }

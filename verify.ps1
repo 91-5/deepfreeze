@@ -22,6 +22,10 @@
         (-Compress 形态) 被 history 拒绝且报格式异常 (fail-closed 不回退) / 空 manifest
         (files=[]) 不被误判 / -ForceLarge 默认落点空间警告出现 / 同卷 -SnapshotRoot 警告
         不回归 (C2) / 正常 protect 不弹空间警告 (-ForceLarge 专属, 防误报)
+  C1~C9 卡号绑定 (DFB-20261019-001): protect --card 合法卡号写 link / link 字段完整且 snap_path
+        绝对路径真实存在 / 非法卡号 fail-closed 且零副作用 / 不带 -Card 不产 link (向后兼容) /
+        同卡重复 protect 覆盖 snap 字段 / 轮转不删被引用 manifest / 共享库模式 link 落源目录 /
+        link 不进快照 / 非 protect 子命令带 -Card 不报错
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -445,6 +449,103 @@ Write-Host '  [Q6] 不误报对照: 正常 protect (无 ForceLarge) 不得弹空
 Reset-Sandbox
 $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
 Check 'Q6 正常 protect 无空间警告 (-ForceLarge 专属, 常态噪音会使警告失效)' ($r.Out -notmatch '源所在卷') $r.Out
+
+
+# ---------- C1~C9 卡号绑定 (DFB-20261019-001, 追加于 96 项之后, 未改动任何既有断言) ----------
+Write-Host "`n[C系列] protect -Card 卡号绑定 + link 文件 (融合期 1)"
+$CLink = "$Sandbox\.freeze\link-DFB-20261019-001.json"
+
+Write-Host '  [C1] 合法卡号: protect 成功且 link 存在, snap_ts 与 history 最新一致'
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+Check 'C1 protect -Card 合法卡号成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'C1 link 文件存在' (Test-Path -LiteralPath $CLink)
+$c1Link = if (Test-Path -LiteralPath $CLink) { Get-Content -LiteralPath $CLink -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+$c1Snaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp' | Sort-Object Name)
+$c1Ts = $c1Snaps[-1].Name -replace '^snap-', ''
+Check 'C1 link.snap_ts 与 history 最新快照一致' ($null -ne $c1Link -and $c1Link.snap_ts -eq $c1Ts) "link=$($c1Link.snap_ts) latest=$c1Ts"
+
+Write-Host '  [C2] link 字段完整, snap_path 为绝对路径且目录真实存在'
+$c2Keys = if ($null -ne $c1Link) { @($c1Link.PSObject.Properties.Name) } else { @() }
+Check 'C2 link 含全部必需字段 (card/snap_ts/snap_path/snapshot_root/source/created_at)' (
+  (@('card','snap_ts','snap_path','snapshot_root','source','created_at') | Where-Object { $c2Keys -notcontains $_ }).Count -eq 0
+) "实际字段: $($c2Keys -join ',')"
+Check 'C2 link.card 与卡号一致' ($null -ne $c1Link -and $c1Link.card -eq 'DFB-20261019-001')
+Check 'C2 snap_path 为绝对路径' ($null -ne $c1Link -and [System.IO.Path]::IsPathRooted($c1Link.snap_path)) "snap_path=$($c1Link.snap_path)"
+Check 'C2 snap_path 指向的目录真实存在' ($null -ne $c1Link -and (Test-Path -LiteralPath $c1Link.snap_path -PathType Container)) "snap_path=$($c1Link.snap_path)"
+
+Write-Host '  [C3] 非法卡号: fail-closed, 零副作用 (无 link / 无快照)'
+# 反例集合覆盖形态逃逸: 小写 / 段数错 / 前缀长度越界 / 数字段位数错 / 路径注入
+$c3Bad = @('dfb-lower', 'ABC-123-1', '', '../../etc', 'DFB-20261019-01', 'DFB-20261019-0001', 'ABCDEFG-20261019-001')
+foreach ($bad in $c3Bad) {
+  Reset-Sandbox
+  $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', $bad, '-AutoConfirm')
+  $c3SnapDirs = @(Get-ChildItem -LiteralPath $Sandbox -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue).Count
+  $c3Links = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
+  Check "C3 非法卡号 '$bad' 被拒 (exit 非 0)" ($r.Code -ne 0) "exit=$($r.Code)"
+  Check "C3 非法卡号 '$bad' 未产生 link 且未产生快照 (零副作用)" ($c3Links -eq 0 -and $c3SnapDirs -eq 0) "links=$c3Links snaps=$c3SnapDirs"
+}
+
+Write-Host '  [C4] 不带 -Card: 兼容性红线, 不产任何 link'
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'C4 不带 -Card protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code)"
+$c4Links = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
+Check 'C4 不带 -Card 时 link 目录无新增 (向后兼容)' ($c4Links -eq 0) "实际 $c4Links"
+
+Write-Host '  [C5] 同卡号二次 protect: link 被覆盖, snap_ts 更新, history 两个快照'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+$c5First = (Get-Content -LiteralPath $CLink -Raw -Encoding UTF8 | ConvertFrom-Json).snap_ts
+Start-Sleep -Milliseconds 1200   # 秒级时间戳需跨秒才能取到不同 snap_ts
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+$c5Second = (Get-Content -LiteralPath $CLink -Raw -Encoding UTF8 | ConvertFrom-Json).snap_ts
+$c5LinkCount = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
+Check 'C5 link 被覆盖 (snap_ts 更新为新快照)' ($c5Second -ne $c5First) "first=$c5First second=$c5Second"
+Check 'C5 link 不追加历史 (同卡仍只有 1 个 link 文件)' ($c5LinkCount -eq 1) "实际 $c5LinkCount"
+$r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+Check 'C5 history 显示两个快照' (([regex]::Matches($r.Out, 'snap-\d{8}-\d{6}')).Count -eq 2) "实际 $(([regex]::Matches($r.Out, 'snap-\d{8}-\d{6}')).Count)"
+
+Write-Host '  [C6] 轮转隔离 (D3): KeepSnapshots=1, 卡引用的旧快照 manifest 不被删'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+$c6Ts = (Get-Content -LiteralPath $CLink -Raw -Encoding UTF8 | ConvertFrom-Json).snap_ts
+Start-Sleep -Milliseconds 1200
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')   # 第二个快照, 不绑卡
+$c6ManBefore = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+Start-Sleep -Milliseconds 1200
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-KeepSnapshots', '1', '-AutoConfirm')
+$c6ManAfter = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+$c6DirGone = -not (Test-Path -LiteralPath "$Sandbox\.freeze-snap\snap-$c6Ts")
+Check 'C6 旧快照目录被轮转删除 (目录删除逻辑不变)' ($c6DirGone) "snap-$c6Ts 仍在? $(Test-Path -LiteralPath "$Sandbox\.freeze-snap\snap-$c6Ts")"
+Check 'C6 被卡引用的旧快照 manifest 仍存在 (D3 生效)' (Test-Path -LiteralPath "$Sandbox\.freeze\manifests\$c6Ts.json") "manifest=$c6Ts"
+Check 'C6 轮转后 manifest 文件数只增不减 (未删被引用清单)' ($c6ManAfter -ge $c6ManBefore) "before=$c6ManBefore after=$c6ManAfter"
+
+Write-Host '  [C7] 共享库模式: link 落 <Source>\.freeze, snap_path 指向共享库绝对路径'
+Reset-Sandbox
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-SnapshotRoot', $HStore, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+Check 'C7 共享库 + -Card protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'C7 link 落在 <Source>\.freeze 下' (Test-Path -LiteralPath $CLink)
+$c7Link = if (Test-Path -LiteralPath $CLink) { Get-Content -LiteralPath $CLink -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+Check 'C7 snap_path 指向共享库内绝对路径且真实存在' ($null -ne $c7Link -and $c7Link.snap_path.StartsWith($HStore) -and (Test-Path -LiteralPath $c7Link.snap_path -PathType Container)) "snap_path=$($c7Link.snap_path)"
+Check 'C7 源目录未产生 .freeze-snap (共享库模式)' (-not (Test-Path -LiteralPath "$Sandbox\.freeze-snap"))
+
+Write-Host '  [C8] link 不进入快照: 快照目录内无 link-*.json (.freeze 被 /XD 排除)'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+$c8Snaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')
+$c8InSnap = 0
+foreach ($s in $c8Snaps) { $c8InSnap += @(Get-ChildItem -LiteralPath $s.FullName -Recurse -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count }
+Check 'C8 快照目录内不存在 link-*.json (link 未进快照)' ($c8InSnap -eq 0) "实际 $c8InSnap"
+Check 'C8 对照: 源 .freeze 下确实有 link (证明 C8 不是空跑)' (Test-Path -LiteralPath $CLink)
+
+Write-Host '  [C9] 非 protect 子命令带 -Card: 不报错退出, 不产生 link'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')   # 先建快照, status 才有意义
+$r = Invoke-Deepfreeze @('status', '-Source', $Sandbox, '-Card', 'DFB-20261019-001')
+Check 'C9 status -Card 不报错退出 (exit 0, 非 protect 忽略该参数)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+$c9Links = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
+Check 'C9 status -Card 不产生 link 文件' ($c9Links -eq 0) "实际 $c9Links"
 
 
 # ---------- 清理 ----------
