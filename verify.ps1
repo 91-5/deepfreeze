@@ -22,10 +22,12 @@
         (-Compress 形态) 被 history 拒绝且报格式异常 (fail-closed 不回退) / 空 manifest
         (files=[]) 不被误判 / -ForceLarge 默认落点空间警告出现 / 同卷 -SnapshotRoot 警告
         不回归 (C2) / 正常 protect 不弹空间警告 (-ForceLarge 专属, 防误报)
-  C1~C9 卡号绑定 (DFB-20261019-001): protect --card 合法卡号写 link / link 字段完整且 snap_path
-        绝对路径真实存在 / 非法卡号 fail-closed 且零副作用 / 不带 -Card 不产 link (向后兼容) /
-        同卡重复 protect 覆盖 snap 字段 / 轮转不删被引用 manifest / 共享库模式 link 落源目录 /
-        link 不进快照 / 非 protect 子命令带 -Card 不报错
+  C1~C11 卡号绑定 (DFB-20261019-001): protect --card 合法卡号写 link / link 字段完整且 snap_path
+        绝对路径真实存在 / 非法卡号 fail-closed 且零副作用 (含大小写敏感 / 仅 ASCII 数字 / 尾部
+        换行三处正则绕过面) / 不带 -Card 不产 link (向后兼容) / 同卡重复 protect 覆盖 snap 字段 /
+        轮转不删被引用 manifest / 共享库模式 link 落源目录 / link 不进快照 / 非 protect 子命令带
+        -Card 不报错 / link 写入失败时 protect 非零退出且 state.json 标记 linked:false / 坏 link
+        触发 BlockAll 警告且 manifest 只增不减
   退出码: 0 = PASS, 1 = FAIL
 #>
 $ErrorActionPreference = 'Stop'
@@ -476,7 +478,13 @@ Check 'C2 snap_path 指向的目录真实存在' ($null -ne $c1Link -and (Test-P
 
 Write-Host '  [C3] 非法卡号: fail-closed, 零副作用 (无 link / 无快照)'
 # 反例集合覆盖形态逃逸: 小写 / 段数错 / 前缀长度越界 / 数字段位数错 / 路径注入
-$c3Bad = @('dfb-lower', 'ABC-123-1', '', '../../etc', 'DFB-20261019-01', 'DFB-20261019-0001', 'ABCDEFG-20261019-001')
+# 末三项为评审必修 1 的正则 fail-open 绕过面 (曾用 -match/\d/$):
+$c3Bad = @(
+  'dfb-lower', 'ABC-123-1', '', '../../etc', 'DFB-20261019-01', 'DFB-20261019-0001', 'ABCDEFG-20261019-001',
+  'dfb-20261019-001',          # 小写合法形态 —— -match 大小写不敏感会放过, 现用 -cnotmatch 拒绝
+  "DFB-20261019-001`n",         # 尾部换行 —— $ 允许末尾 \n 前锚定, 现用 \z 拒绝
+  'DFB-٢٠٢٦١٠١٩-٠٠١'           # Unicode 数字 —— \d 匹配 Nd 类, 现用 [0-9] 拒绝
+)
 foreach ($bad in $c3Bad) {
   Reset-Sandbox
   $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', $bad, '-AutoConfirm')
@@ -492,6 +500,11 @@ $r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
 Check 'C4 不带 -Card protect 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code)"
 $c4Links = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
 Check 'C4 不带 -Card 时 link 目录无新增 (向后兼容)' ($c4Links -eq 0) "实际 $c4Links"
+# 兼容性红线: 不带 -Card 时 state.json 形状必须与旧版逐位一致 —— 不多出 linked 字段
+$c4Keys = @((Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties.Name)
+Check 'C4 不带 -Card 时 state.json 无 linked 字段 (旧版形状逐位一致)' (
+  $c4Keys -notcontains 'linked'
+) "keys=$($c4Keys -join ',')"
 
 Write-Host '  [C5] 同卡号二次 protect: link 被覆盖, snap_ts 更新, history 两个快照'
 Reset-Sandbox
@@ -546,6 +559,30 @@ $r = Invoke-Deepfreeze @('status', '-Source', $Sandbox, '-Card', 'DFB-20261019-0
 Check 'C9 status -Card 不报错退出 (exit 0, 非 protect 忽略该参数)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
 $c9Links = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze" -File -Filter 'link-*.json' -ErrorAction SilentlyContinue).Count
 Check 'C9 status -Card 不产生 link 文件' ($c9Links -eq 0) "实际 $c9Links"
+
+Write-Host '  [C10] link 写入失败: protect 非零退出且 state.json 标记 linked:false (必修 2)'
+Reset-Sandbox
+# 用一个同名目录占位 link 路径, 令 Set-Content 写入失败 (磁盘满/权限类失败的确定性替身)
+New-Item -ItemType Directory -Force -Path "$Sandbox\.freeze\link-DFB-20261019-002.json" | Out-Null
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-002', '-AutoConfirm')
+Check 'C10 link 写入失败时 protect 非零退出' ($r.Code -ne 0) "exit=$($r.Code)"
+Check 'C10 报错含 link 写入失败说明' ($r.Out -match 'link 写入失败') $r.Out
+$c10State = Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+Check 'C10 state.json 标记 linked=false (可辨识断裂)' ($null -ne $c10State.PSObject.Properties['linked'] -and $c10State.linked -eq $false) "linked=$($c10State.linked)"
+$c10Snaps = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp').Count
+Check 'C10 快照仍已提交 (link 失败不回滚快照)' ($c10Snaps -ge 1) "实际 $c10Snaps"
+
+Write-Host '  [C11] 坏 link: BlockAll 警告出现且 manifest 只增不减 (必修 5)'
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-Card', 'DFB-20261019-001', '-AutoConfirm')
+'NOT JSON {{{' | Set-Content -LiteralPath "$Sandbox\.freeze\link-DFB-20261019-001.json" -Encoding UTF8
+Start-Sleep -Milliseconds 1200
+$c11Before = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+Start-Sleep -Milliseconds 1200
+$r = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-KeepSnapshots', '1', '-AutoConfirm')
+$c11After = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Filter '*.json' -ErrorAction SilentlyContinue).Count
+Check 'C11 坏 link 触发 BlockAll 警告 (manifest 轮转已暂停)' ($r.Out -match '轮转已暂停') $r.Out
+Check 'C11 坏 link 时 manifest 只增不减 (不删任何清单)' ($c11After -ge $c11Before) "before=$c11Before after=$c11After"
 
 
 # ---------- 清理 ----------

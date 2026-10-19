@@ -355,6 +355,8 @@ function Get-LinkedSnapTs {
   # 返回 @{ BlockAll = <bool>; Ts = <HashSet[string] 或 $null> }:
   #   BlockAll=$true  → 坏 link(非法 JSON / 缺 snap_ts / 读失败), 无法确知引用关系,
   #                     按 fail-closed 保守方案视为「引用全部快照」= 不删任何 manifest。
+  #                     ⚠️ 已知债务(评审必修 5): BlockAll 无界 —— 坏 link 不清除则 manifest 只增不减;
+  #                     故触发时 Write-Warning 明确提示「manifest 轮转已暂停」, 需人工修复 link 后重跑。
   #   BlockAll=$false + Ts=$null → 无 link(或无 .freeze), 与旧版逐位一致 = 正常删清单。
   #   BlockAll=$false + Ts=集合 → 仅这些 ts 跳过 manifest 删除。
   # 不能只用 $null 表达「坏 link」: 那会与「无 link」混同, 把 fail-closed 退化成正常删除(反了)。
@@ -367,9 +369,12 @@ function Get-LinkedSnapTs {
     try {
       $obj = Get-Content -LiteralPath $lf.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
       if ($obj.PSObject.Properties['snap_ts'] -and $obj.snap_ts) { $null = $set.Add([string]$obj.snap_ts) }
-      else { Write-Warning "link 文件缺 snap_ts, 按 fail-closed 保守处理(不删任何清单): $($lf.Name)"; return @{ BlockAll = $true; Ts = $null } }
+      else {
+        Write-Warning "检测到损坏 link 文件 (缺 snap_ts): '$($lf.Name)'。manifest 轮转已暂停 (fail-closed: 本次不删任何 manifest) —— 请人工修复 .freeze\link-*.json 后重跑 protect 以恢复轮转。"
+        return @{ BlockAll = $true; Ts = $null }
+      }
     } catch {
-      Write-Warning "link 文件解析失败, 按 fail-closed 保守处理(不删任何清单): $($lf.Name)"
+      Write-Warning "检测到损坏 link 文件 (解析失败): '$($lf.Name)'。manifest 轮转已暂停 (fail-closed: 本次不删任何 manifest) —— 请人工修复 .freeze\link-*.json 后重跑 protect 以恢复轮转。"
       return @{ BlockAll = $true; Ts = $null }
     }
   }
@@ -403,9 +408,13 @@ switch ($Action) {
   'protect' {
     # -Card 校验 (DFB-20261019-001, fail-closed): 显式传入但不匹配卡号正则即 throw。
     # 必须排在规模护栏与任何写操作(New-Item / robocopy)之前 —— 非法卡号拒绝时源目录零副作用。
-    # -notmatch 对空串返回 $true, 故传了空串也会被拒(空串无法与「未传」混同: 未传时 $cardProvided 为 $false)。
-    if ($cardProvided -and ($Card -notmatch '^[A-Z]{2,6}-\d{8}-\d{3}$')) {
-      throw "非法卡号: '$Card'。要求匹配 ^[A-Z]{2,6}-\d{8}-\d{3}$ (例: DFB-20261019-001), 已拒绝 (fail-closed)。"
+    # 正则刻意收严(评审必修 1, 堵三处 fail-open 绕过面):
+    #   -cnotmatch  大小写敏感 —— PowerShell -match 默认大小写不敏感, '[A-Z]' 实际会放过 a-z;
+    #   [0-9]       仅 ASCII 数字 —— \d 在 .NET 匹配 Unicode 数字(Nd 类, 阿拉伯-印度数字可通过);
+    #   \z          绝对末尾锚定 —— $ 在 .NET 允许在末尾 \n 之前锚定, "卡号\n" 会绕过。
+    # -cnotmatch 对空串返回 $true, 故空串也被拒(空串与「未传」靠 $cardProvided 区分)。
+    if ($cardProvided -and ($Card -cnotmatch '^[A-Z]{2,6}-[0-9]{8}-[0-9]{3}\z')) {
+      throw "非法卡号: '$Card'。要求匹配 ^[A-Z]{2,6}-[0-9]{8}-[0-9]{3}\z (大小写敏感, 仅 ASCII 数字; 例: DFB-20261019-001), 已拒绝 (fail-closed)。"
     }
     # 规模护栏必须先于一切写操作(含下面 New-Item 建目录)执行, 拒绝时源目录零副作用
     Test-SourceScale -Root $Source
@@ -466,8 +475,11 @@ switch ($Action) {
       # restore/status/history/unprotect 凭此字段找快照; 旧版 state.json 无此字段 → 回落默认位置
       snapshot_root = $SnapRoot
     }
+    # 卡 ↔ 快照绑定 (DFB-20261019-001, D2)。仅 -Card 时给 state.json 增 linked 字段;
+    # 不带 -Card 时 state.json 形状与旧版逐位一致(兼容性红线 —— 不加 linked 键)。
+    # 先落 linked=false, link 写成功后再置 true —— 使「快照已提交但 link 缺失」在 state.json 可辨识(评审必修 2)。
+    if ($cardProvided) { $newState.linked = $false }
     ($newState | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding UTF8
-    # 卡 ↔ 快照绑定 (DFB-20261019-001, D2): 在快照提交成功 + state.json 落盘之后、轮转之前写入。
     # [ordered] + ConvertTo-Json 与 state.json 风格一致; snap_path 记快照目录绝对路径
     # (共享库模式下在源目录外, 必须绝对)。同卡号二次 protect 覆盖同一文件(最新快照胜出, 不追加历史);
     # 文件名中的卡号已过上方正则(无路径分隔符注入面), 但仍用 -LiteralPath 操作。
@@ -481,7 +493,15 @@ switch ($Action) {
         source        = $Source
         created_at    = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
       }
-      ($link | ConvertTo-Json) | Set-Content -LiteralPath $linkFile -Encoding UTF8
+      # link 写失败不得静默 (评审必修 2): 快照已提交, 但可追溯链断裂必须让 protect 非零退出且可见;
+      # state.json 停留在 linked=false。错误信息给出补写路径, 便于人工恢复。
+      try {
+        ($link | ConvertTo-Json) | Set-Content -LiteralPath $linkFile -Encoding UTF8
+      } catch {
+        throw "快照已提交 (snap-$ts) 但 link 写入失败: '$linkFile'。state.json 已标记 linked=false。可手动重跑 protect -Source '$Source' -Card '$Card' 补写 link。底层错误: $($_.Exception.Message)"
+      }
+      $newState.linked = $true
+      ($newState | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding UTF8
     }
     Remove-OldSnapshots
     Write-Log "protect 完成: $($manifest.files.Count) 个文件入快照 snap-$ts"

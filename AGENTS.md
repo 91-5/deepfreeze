@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |---|---|
 | `deepfreeze.ps1` | 主体。子命令：`protect` / `restore` / `status` / `history` / `unprotect` |
-| `verify.ps1` | 自检套件。**133 项断言**（96 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造，+ 9 项 Q 系格式守卫与 ForceLarge 空间警告，+ 37 项 C 系卡号绑定与 link 文件）。退出码 0 = PASS |
+| `verify.ps1` | 自检套件。**146 项断言**（96 项基线 N1~N8 + T1~T6，+ 13 项 G 系规模护栏，+ 27 项 H 系 SnapshotRoot 含 H8 purge 孤儿清理边界，+ 8 项 P 系 manifest 性能改造，+ 9 项 Q 系格式守卫与 ForceLarge 空间警告，+ 50 项 C 系卡号绑定与 link 文件）。退出码 0 = PASS |
 | `README.md` | 用户文档 |
 
 核心能力：**多时间点快照**（每次 `protect` 追加一个 `snap-<yyyyMMdd-HHmmss>`，不覆盖）。
@@ -26,7 +26,7 @@ git status --short          # 必须空
 
 | 门禁 | 命令 | 最近实测 |
 |---|---|---|
-| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (133 项断言)** EXITCODE=0 |
+| `verify.ps1` | `powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1` | **PASS (146 项断言)** EXITCODE=0 |
 | `lint_cards` | `python ...\lint_cards.py --dir .tasks --verdict-dir verdicts` | **PASS (1 warning)** — 活跃卡无 verdict，正常 |
 | `gate.py` | 见下方「两目录」说明（**两目录各跑一次**） | 活跃区 PASS(0) /归档区随 verdict 状态变化 |
 

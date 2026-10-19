@@ -141,7 +141,13 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
   任何写操作之前，拒绝时源目录零副作用）。
 - **回滚安全隔离（D3）**：快照轮转删除旧快照**目录**时，若某 `link-*.json` 仍引用其 `snap_ts`，
   该快照的 **manifest 跳过删除**（目录与清单解耦，清单仅数 KB，保住门禁回滚所需清单）。
-  若 link 文件损坏（非法 JSON / 缺 `snap_ts`），按 **fail-closed** 保守处理：**不删任何 manifest**。
+  若 link 文件损坏（非法 JSON / 缺 `snap_ts`），按 **fail-closed** 保守处理：**不删任何 manifest**，
+  并 `Write-Warning` 提示「manifest 轮转已暂停」。
+  ⚠️ **已知债务（期 1）**：坏 link 会让 manifest **只增不减**（上界无界）。触发时 protect 会告警，
+  需**人工修复** `.freeze\link-*.json` 后重跑 protect 才恢复轮转；自动化清理留待后续期次。
+- **link 写入失败**：快照提交成功但 link 写失败（磁盘满/权限）时，`protect` **非零退出**
+  （不静默断裂可追溯链），`state.json` 标记 `linked:false`，错误信息给出「重跑 protect -Card 补写」的恢复路径。
+  不带 `-Card` 的 protect 不写 `linked` 字段，`state.json` 形状与旧版**逐位一致**（兼容性红线）。
 
 期 2（covenant 门禁读 link 校验）、期 3（派卡自动 protect）、期 4（FAIL 自动回滚）**均未实现**，
 不在本工具范围。
@@ -174,10 +180,12 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
 # + Q1~Q6 格式守卫 + ForceLarge 空间警告（紧凑单行格式被 history 拒绝报"格式异常" /
 #   空 manifest 不误判 / -ForceLarge 默认落点空间警告 / 同卷 -SnapshotRoot 警告不回归 /
 #   正常 protect 不弹空间警告）
-# + C1~C9 卡号绑定（protect -Card 合法卡号写 link / link 字段完整且 snap_path 绝对路径真实存在 /
-#   非法卡号 fail-closed 且零副作用 / 不带 -Card 不产 link / 同卡重复 protect 覆盖 snap 字段 /
-#   轮转不删被引用 manifest / 共享库模式 link 落源目录 / link 不进快照 / 非 protect 子命令带 -Card 不报错）
-# PASS = exit 0（断言总数见脚本尾部输出：96 项基线 + 37 项 C 系断言 = 133 项）
+# + C1~C11 卡号绑定 + link 安全（protect -Card 合法卡号写 link / link 字段完整且 snap_path 绝对路径真实存在 /
+#   非法卡号 fail-closed 且零副作用（含大小写敏感 / 仅 ASCII 数字 / 尾部换行三处正则绕过面）/ 不带 -Card 不产 link /
+#   同卡重复 protect 覆盖 snap 字段 / 轮转不删被引用 manifest / 共享库模式 link 落源目录 / link 不进快照 /
+#   非 protect 子命令带 -Card 不报错 / link 写入失败时 protect 非零退出且 state.json 标记 linked:false /
+#   坏 link 触发 BlockAll 警告且 manifest 只增不减）
+# PASS = exit 0（断言总数见脚本尾部输出：96 项基线 + 50 项 C 系断言 = 146 项）
 ```
 
 > ⚠ **开发者约束**：manifest 必须保持 `ConvertTo-Json -Depth 5` 的**多行缩进格式**——
@@ -202,6 +210,10 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
    **「agent 一动手就自动打快照」这个形态目前不存在**，是被保护目录内手动管理快照的工具。
    触发仍为手动，但 `protect` 支持 `-Card` 记录「卡 ↔ 快照」绑定（融合期 1，期 2/3/4 未实现）。
 6. **不防多时间点之间的外部状态漂移**——只认文件内容，不认「世界」。
+7. **坏 `link-*.json` 会让 manifest 轮转暂停（期 1 已知债务）**——为保住门禁回滚所需的清单，
+   检测到损坏 link 时按 fail-closed **不删任何 manifest**（会 `Write-Warning` 告警），
+   结果是 manifest 目录**只增不减**、上界无界，需**人工修复** 损坏的 `.freeze\link-*.json`
+   后重跑 protect 才恢复轮转。自动化坏-link 清理/隔离留待后续期次。
 
 若将来确实需要「真·冰点」：唯一现实的下一阶段是 Hyper-V 差分磁盘 checkpoint
 （整机进 VM，Windows 自带差分磁盘做整机快照，无需写驱动）。本工具不涉及此方向。
