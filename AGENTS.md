@@ -134,6 +134,11 @@ git branch -vv
 > 建立「卡 ↔ 快照」绑定，供 covenant 门禁（期 2）读取（融合期 1，DFB-20261019-001）。
 > 卡号须匹配 `^[A-Z]{2,6}-\d{8}-\d{3}$`，否则 fail-closed 拒绝；不带 `-Card` 行为与旧版逐位一致。
 
+> 期 3 宿主集成（DFB-20261021-002）：OpenCode 插件 `deepfreeze-autosnap`（`~/.config/opencode/plugins/`）
+> 在写类工具执行前自动 protect——10 分钟窗口节流（状态持久化 `.freeze\autosnap-state.json`），
+> **fail-open**：protect 失败绝不阻断写操作（快照是后悔药，fail-closed 是 covenant gate 的职责）。
+> 插件快照无 `-Card`（无 link 文件，不与 LINK_NOT_STAMPED 冲突）；卡号绑定仍走上面的派卡纪律。
+
 > 本项目自身已有 `.freeze` 快照（2026-10-05 起，ZCode 按纪律开工前打的基线）。**动 `deepfreeze.ps1` / `verify.ps1` 之前先确认有可用快照**：`.\deepfreeze.ps1 history -Source "$PWD"`。
 
 ### 3. 改代码走出卡流程

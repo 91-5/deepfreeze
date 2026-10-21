@@ -226,16 +226,17 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
 若将来确实需要「真·冰点」：唯一现实的下一阶段是 Hyper-V 差分磁盘 checkpoint
 （整机进 VM，Windows 自带差分磁盘做整机快照，无需写驱动）。本工具不涉及此方向。
 
-## 路线图（尚未实现，写在前面免得误解）
-
-按价值排序，都**未实现**：
+## 路线图（写在前面免得误解）
 
 1. **接入 agent hook —— 危险操作前自动 protect**。这是把本项目从「手动工具」变成
    「agent 基础设施」的关键一步，也是与 `agent-undo` / `agent-rollback` 类工具的差异点。
-   现状：**完全没有**，需要宿主（如 OpenCode）在写操作前暴露 hook 点。
-   **部分前置已就绪：link 绑定已落地（期 1，`protect -Card`），期 2 门禁读 link 待实现。**
+   ✅ **已落地（期 3，DFB-20261021-002）**：OpenCode 插件 `deepfreeze-autosnap`
+   （节流形态，见「宿主集成」节）——写类工具执行前自动 protect，10 分钟窗口节流，
+   fail-open（protect 失败绝不阻断写操作）。卡号绑定仍由 `protect -Card` 派卡纪律承载（期 1）；
+   期 2 门禁读 link 已闭环。
 2. **Linux/macOS 支持**——需重写文件操作层（去掉 `robocopy` 依赖），成本高，优先级低。
-3. **条件触发快照**（如「目录变更超过 N 个文件时自动 protect」）——仍缺文件监听层。
+3. **条件触发快照**（如「目录变更超过 N 个文件时自动 protect」）——节流窗口是它的一种形态
+   （期 3 已落地）；更细粒度的文件监听层仍缺。
 
 其他边界：
 
@@ -243,10 +244,45 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
 - `prerestore-*` 备份与快照是两套东西：快照是「回到某个时间点」，prerestore 是「还原出错时退回还原前」，语义不同，不合并
 - 规模护栏挡的是「合法但危险」的调用（整盘/边界级 protect），不挡正常项目目录；`-ForceLarge` 是给「我就是知道它很大、我就是要保护」的场景留的显式出口，不是常规参数
 
+## 宿主集成（OpenCode 插件 · 期 3，DFB-20261021-002）
+
+`deepfreeze-autosnap` 插件挂在 OpenCode 的 `tool.execute.before` 上：agent 的写类工具
+（edit/write/patch）执行前，自动对目标项目根调一次 `protect`。**这是「agent 一动手就
+有新鲜快照」的落地形态**——但请如实理解它的边界：
+
+- **节流，不是每次写都拍**：状态持久化在 `<项目根>\.freeze\autosnap-state.json`（原子写），
+  同目录 10 分钟窗口（`DEEPFREEZE_AUTOSNAP_WINDOW_SEC` 可调）内只拍一次。保障粒度 =
+  **窗口起点**——连续改 20 个文件，中途改坏只能 restore 回窗口起点（前序好改动一并回滚），
+  这是「后悔药」语义的固有代价，不是逐步回滚。
+- **fail-open，绝不阻断写操作**：protect 失败（规模护栏拒绝/超时/任何错误）只 `console.warn`，
+  写操作照常执行，且失败会重置窗口槽（下一次写立即重试）。**快照是后悔药，不是门禁**——
+  fail-closed 是 agent-covenant 的 gate 的职责，两者分工不同。
+- **无 `--Card`**：插件的快照不绑定任务卡（无 link 文件）——LINK_NOT_STAMPED 不会误报
+  （它只在「link 存在但未回写」时触发），restore 也不需要 link。卡号绑定仍由派卡时的
+  `protect -Card <卡号>` 纪律承载（期 1）。
+- **多会话并发**：节流状态持久化共享；两个会话同时撞进窗口可能双拍——快照只追加不覆盖，
+  多一份只费磁盘，不损正确性。
+
+**配置**（全部可选，插件路径 `~/.config/opencode/plugins/deepfreeze-autosnap.js`）：
+
+| 环境变量 | 作用 | 默认 |
+|---|---|---|
+| `DEEPFREEZE_SCRIPT` | deepfreeze.ps1 绝对路径（**必填**，不设则插件惰性并告警一次） | —— |
+| `DEEPFREEZE_AUTOSNAP_ROOTS` | 分号分隔的项目根白名单 | 未设 = 仅当前会话的 worktree |
+| `DEEPFREEZE_AUTOSNAP_TOOLS` | 写工具名的正则 | `^(edit\|write\|patch)` |
+| `DEEPFREEZE_AUTOSNAP_WINDOW_SEC` | 节流窗口秒数 | 600（10 分钟） |
+
+白名单解析顺序：环境变量 → 项目根的 `.deepfreeze-autosnap` 标记文件（存在即启用）→
+默认仅当前会话的 worktree。换机器/新项目目录用前两个配置，不硬编码。
+
+自测：`bun tools/autosnap-selftest.mjs`（8 场景：触发/节流/窗口过期/非写工具/白名单外/
+fail-open/失败后重试/状态原子性——走真实 PowerShell 子进程，非 mock 内部）。
+
 ## 文件
 
 | 文件 | 角色 |
 |---|---|
 | `deepfreeze.ps1` | 主脚本 |
 | `verify.ps1` | 自检 |
+| `tools/autosnap-selftest.mjs` | 期 3 插件的验收测试（bun 跑） |
 | `_selftest\` | 自检夹具（自动重建，已 gitignore） |
