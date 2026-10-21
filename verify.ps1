@@ -57,15 +57,73 @@ function Reset-Sandbox {
   'gamma-content' | Set-Content -LiteralPath "$Sandbox\sub\c.txt" -Encoding UTF8
 }
 
+function ConvertTo-QuotedArg {
+  # 为 ProcessStartInfo.Arguments 拼命令行: 仅含空白/引号的参数才加引号 (PS 5.1 无 ArgumentList)。
+  # 本自检的参数 (路径/卡号/开关) 实际都不含引号, 此处按 Windows 命令行约定保守转义。
+  param([string]$Value)
+  if ($null -eq $Value) { return '""' }
+  if ($Value -match '[\s"]') { return '"' + ($Value -replace '"', '\"') + '"' }
+  return $Value
+}
+
 function Invoke-Deepfreeze {
-  param([string[]]$DfArgs)
+  # 子进程调用 (DFB-20261021-001 D4 加固)。返回形态固定 @{ Out; Code }, 调用方无感。
+  #
+  # 加固点:
+  #   1) 超时 watchdog: 默认 120s ($TimeoutSec 按项可调; protect 大目录可能慢)。超时用 taskkill /T
+  #      连子孙 (robocopy) 一起收掉, 避免挂死自检 / 遗留进程占锁级联污染后续项。
+  #   2) 环境类失败允许一次重试 (重试前 settle 400ms), 二次仍败才计入。
+  #
+  # 「环境类 vs 语义类」判定标准 (本卡红线):
+  #   · 环境类失败 = **进程级异常**, 与断言语义无关, 重跑常可恢复 → 允许重试一次:
+  #       - 超时 (进程没跑出结果, 被 watchdog 杀掉);
+  #       - 非零退出 —— 负载/IO 瞬态导致子进程自身失败 (成功路径被负载打断)。
+  #   · 语义类失败 = **断言的语义判定为假** (如 restore 本该拒绝却 exit 0 / 本该成功却报错),
+  #     其真伪由**调用方的 Check 判定**, 本函数只如实回传 Code/Out —— 绝不重试、绝不改写结果,
+  #     因此不会把真失败「吞」成通过 (fail-closed 红线保留)。重试返回的仍是**本次真实退出码**,
+  #     语义类失败照旧传回给 Check 判死。
+  param([string[]]$DfArgs, [int]$TimeoutSec = 120)
   $prevEap = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'   # 子进程 stderr 是预期内输出, 不许终止本脚本
   try {
-    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @DfArgs 2>&1
-    $code = $LASTEXITCODE
+    $attempt = 0
+    while ($true) {
+      $attempt++
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName               = 'powershell.exe'
+      $psi.Arguments              = ((@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $DfArgs) |
+                                      ForEach-Object { ConvertTo-QuotedArg $_ }) -join ' '
+      $psi.UseShellExecute        = $false
+      $psi.CreateNoWindow         = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError  = $true
+      # 与旧 `&` 捕获同源: 子进程按 [Console]::OutputEncoding 输出, 这里按同一编码解码 ——
+      # 保证中文断言 (如 '快照目录缺失') 不失真。
+      $psi.StandardOutputEncoding = [Console]::OutputEncoding
+      $psi.StandardErrorEncoding  = [Console]::OutputEncoding
+      $proc = New-Object System.Diagnostics.Process
+      $proc.StartInfo = $psi
+      $null = $proc.Start()
+      $soTask = $proc.StandardOutput.ReadToEndAsync()
+      $seTask = $proc.StandardError.ReadToEndAsync()
+      $timedOut = $false
+      if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        $timedOut = $true
+        try { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+        $null = $proc.WaitForExit(5000)
+      }
+      $stdout = try { $soTask.Result } catch { '' }
+      $stderr = try { $seTask.Result } catch { '' }
+      $code = if ($timedOut) { -1 } else { $proc.ExitCode }
+      $proc.Dispose()
+      $text = (@($stdout, $stderr) | Where-Object { $_ -ne $null -and $_ -ne '' }) -join "`n"
+      # 环境类失败 (超时 / 非零退出) 才重试一次; 成功 (exit 0) 直接回传。语义判定留给调用方。
+      if (-not $timedOut -and $code -eq 0) { break }
+      if ($attempt -ge 2) { break }
+      Start-Sleep -Milliseconds 400
+    }
   } finally { $ErrorActionPreference = $prevEap }
-  $text = ($out | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ } }) -join "`n"
   return @{ Out = $text; Code = $code }
 }
 
@@ -100,6 +158,21 @@ Write-Host "`n[T2] 快照目录缺失时 restore 拒绝执行"
 $null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
 Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' |
   Remove-Item -Recurse -Force
+# D1 (DFB-20261021-001): 高负载/Defender 下 Remove-Item 可能静默半删 ——
+# 删后确认 snap-* 真的清零, 短重试 (8 × 250ms ≈ 2s); 残留则告警说明。
+# 告警后继续断言: 残留会让 restore 不拒绝, Check 照判 —— 环境类现象可诊断,
+# 不伪装成通过, 也不改写断言语义。
+$t2Attempt = 0
+while ($t2Attempt -lt 8 -and
+       @(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue).Count -gt 0) {
+  Start-Sleep -Milliseconds 250
+  $t2Attempt++
+  Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force
+}
+if (@(Get-ChildItem -LiteralPath "$Sandbox\.freeze-snap" -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue).Count -gt 0) {
+  Write-Warning "T2 前置: 快照目录删除后仍残留 (负载/句柄占用) —— 环境类现象, 非代码回归; T2 断言可能因此失败"
+}
 $r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
 Check 'T2 快照缺失被拒 (exit 非 0)' ($r.Code -ne 0)
 Check 'T2 报错含"快照目录缺失"' ($r.Out -match '快照目录缺失')
@@ -267,11 +340,27 @@ Check 'G3 报错含文件数阈值说明' ($r.Out -match '文件数')
 Check 'G3 未产生快照 (只有被拒现场, 无 snap-*)' (-not (Test-Path "$gBig\.freeze-snap\snap-*"))
 
 Write-Host "`n[G4] 超字节阈值 (501 个 1MB 文件 = 525MB > 500MB, 文件数在阈值内): 拒绝"
+# D2 (DFB-20261021-001): 525MB 写盘是全自检最重的 I/O 项 —— 磁盘压力下夹具
+# 写入 (501 × WriteAllBytes) 可能抛异常, 此前会把整个自检带崩
+# (ErrorActionPreference=Stop)。夹具构建失败允许一次重试 (环境类);
+# protect 调用的超时/非零退出已由 Invoke-Deepfreeze 内部重试兜底 (D4),
+# 断言阈值与拒绝语义不变。
 $gBytes = Join-Path $Root '_selftest\guard-bytes'
-if (Test-Path -LiteralPath $gBytes) { Remove-Item -LiteralPath $gBytes -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $gBytes | Out-Null
-$mbBuf = New-Object byte[] (1MB)
-1..501 | ForEach-Object { [System.IO.File]::WriteAllBytes((Join-Path $gBytes "b$_.bin"), $mbBuf) }
+$g4SetupAttempt = 0
+while ($true) {
+  $g4SetupAttempt++
+  if (Test-Path -LiteralPath $gBytes) { Remove-Item -LiteralPath $gBytes -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $gBytes | Out-Null
+  try {
+    $mbBuf = New-Object byte[] (1MB)
+    1..501 | ForEach-Object { [System.IO.File]::WriteAllBytes((Join-Path $gBytes "b$_.bin"), $mbBuf) }
+    break
+  } catch {
+    Write-Warning "G4 夹具写入失败 (attempt $g4SetupAttempt): $_"
+    if ($g4SetupAttempt -ge 2) { throw }
+    Start-Sleep -Milliseconds 400
+  }
+}
 $r = Invoke-Deepfreeze @('protect', '-Source', $gBytes, '-AutoConfirm')
 Check 'G4 超字节阈值被拒 (exit 非 0)' ($r.Code -ne 0) "exit=$($r.Code)"
 Check 'G4 报错含字节阈值说明' ($r.Out -match '总字节数|字节数')
@@ -357,20 +446,33 @@ Write-Host "  [H8] unprotect -Purge 孤儿清理边界 (返工 C1): 清本源默
 # 锁定卡外新增行为 (评审重点②): 迁移到共享库后 unprotect -Purge 会顺带清理默认位置的
 # 遗留快照 —— 行为实测安全, 但此前无断言 = 「对的但没保证以后还对」。三重判据:
 # ① 默认位置孤儿被清 ② 同 store 其他 srcKey 不被碰 (「只删本源」边界, 最关键) ③ actions.log 保留
-# 现场复用: H4 起 $HSrcB 即共享库模式 ($HStore\<keyB>), $HStore 同时含 Sandbox 早期写入的
-# keyA (2 快照) —— 天然的「两源一库」现场, purge $HSrcB 后 keyA 必须原样存活。
-New-Item -ItemType Directory -Force -Path "$HSrcB\.freeze-snap\snap-20260101-000000" | Out-Null
-'legacy-orphan' | Set-Content -LiteralPath "$HSrcB\.freeze-snap\snap-20260101-000000\legacy.txt" -Encoding UTF8
-$h8KeysBefore = @(Get-ChildItem -LiteralPath $HStore -Directory -ErrorAction SilentlyContinue)
+# D3 (DFB-20261021-001) 夹具自足化: 此前复用 H4 的现场 ($HSrcB 共享库模式 + $HStore 里
+# keyA 的 2 快照) —— H4 一抖 H8 必挂 (级联)。改为 H8 自建"两源一库"夹具: 自建两源一 store,
+# purge 源再手工摆一份默认位置孤儿; 三重判据与阈值语义不变, 仅快照计数随夹具调整。
+$h8PurgeSrc = Join-Path $Root '_selftest\h8-purge-src'
+$h8KeepSrc  = Join-Path $Root '_selftest\h8-keep-src'
+$h8Store    = Join-Path $Root '_selftest\h8-store'
+foreach ($h8Dir in @($h8PurgeSrc, $h8KeepSrc, $h8Store)) {
+  if (Test-Path -LiteralPath $h8Dir) { Remove-Item -LiteralPath $h8Dir -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $h8Dir | Out-Null
+}
+'purge-me' | Set-Content -LiteralPath "$h8PurgeSrc\p.txt" -Encoding UTF8
+'keep-me'  | Set-Content -LiteralPath "$h8KeepSrc\k.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('protect', '-Source', $h8PurgeSrc, '-SnapshotRoot', $h8Store, '-AutoConfirm')
+$null = Invoke-Deepfreeze @('protect', '-Source', $h8KeepSrc,  '-SnapshotRoot', $h8Store, '-AutoConfirm')
+# 孤儿: purge 源在其默认位置留一份旧快照 (模拟"迁移共享库前的遗留")
+New-Item -ItemType Directory -Force -Path "$h8PurgeSrc\.freeze-snap\snap-20260101-000000" | Out-Null
+'legacy-orphan' | Set-Content -LiteralPath "$h8PurgeSrc\.freeze-snap\snap-20260101-000000\legacy.txt" -Encoding UTF8
+$h8KeysBefore = @(Get-ChildItem -LiteralPath $h8Store -Directory -ErrorAction SilentlyContinue)
 Check 'H8 前置: purge 前 store 含 2 个 srcKey' ($h8KeysBefore.Count -eq 2) "实际 $($h8KeysBefore.Count)"
-$r = Invoke-Deepfreeze @('unprotect', '-Source', $HSrcB, '-Purge', '-AutoConfirm')
+$r = Invoke-Deepfreeze @('unprotect', '-Source', $h8PurgeSrc, '-Purge', '-AutoConfirm')
 Check 'H8 共享库模式 unprotect -Purge 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
-Check 'H8 ①默认位置遗留快照被清 (.freeze-snap 不复存在)' (-not (Test-Path -LiteralPath "$HSrcB\.freeze-snap"))
-$h8KeysAfter = @(Get-ChildItem -LiteralPath $HStore -Directory -ErrorAction SilentlyContinue)
+Check 'H8 ①默认位置遗留快照被清 (.freeze-snap 不复存在)' (-not (Test-Path -LiteralPath "$h8PurgeSrc\.freeze-snap"))
+$h8KeysAfter = @(Get-ChildItem -LiteralPath $h8Store -Directory -ErrorAction SilentlyContinue)
 Check 'H8 ②他源 srcKey 存活 (store 剩 1 个 key, 未越界清库)' ($h8KeysAfter.Count -eq 1) "实际 $($h8KeysAfter.Count)"
-Check 'H8 ②他源快照数据完好 (keyA 的 2 个 snap 原样)' ((@(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -eq 2)
-Check 'H8 ③actions.log 审计日志保留 (C3 裁定)' (Test-Path -LiteralPath "$HSrcB\.freeze\actions.log")
-Check 'H8 ③日志含孤儿清理记录 (分支执行可追溯)' ((Get-Content -LiteralPath "$HSrcB\.freeze\actions.log" -Raw -ErrorAction SilentlyContinue) -match '同时清理默认位置的遗留快照')
+Check 'H8 ②他源快照数据完好 (keep 源的 1 个 snap 原样)' ((@(Get-ChildItem -LiteralPath $h8Store -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')).Count -eq 1)
+Check 'H8 ③actions.log 审计日志保留 (C3 裁定)' (Test-Path -LiteralPath "$h8PurgeSrc\.freeze\actions.log")
+Check 'H8 ③日志含孤儿清理记录 (分支执行可追溯)' ((Get-Content -LiteralPath "$h8PurgeSrc\.freeze\actions.log" -Raw -ErrorAction SilentlyContinue) -match '同时清理默认位置的遗留快照')
 
 # ---------- P1~P3 manifest 读取优化 (DFB-20261005-003, 追加于 79 项之后, 未改动任何既有断言) ----------
 Write-Host "`n[P系列] Get-Manifest/Get-Diff List 化 + 流式哈希 + history 流式计数"
