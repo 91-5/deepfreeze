@@ -41,7 +41,7 @@ function writeFailingPs1(dir) {
 }
 
 function makePlugin(overrides = {}) {
-  process.env.DEEEPFREEZE_SCRIPT = overrides.script ?? ""
+  process.env.DEEPFREEZE_SCRIPT = overrides.script ?? ""
   if (overrides.roots !== undefined) process.env.DEEPFREEZE_AUTOSNAP_ROOTS = overrides.roots
   else delete process.env.DEEPFREEZE_AUTOSNAP_ROOTS
   if (overrides.tools !== undefined) process.env.DEEPFREEZE_AUTOSNAP_TOOLS = overrides.tools
@@ -161,6 +161,39 @@ await check("8 状态原子性: hook 调用后 .freeze 下无 .tmp 残留，状�
   const residue = readdirSync(join(root, ".freeze")).filter(f => f.includes(".tmp"))
   assert.equal(residue.length, 0, `残留 tmp: ${residue.join(",")}`)
   assert.ok(JSON.parse(readFileSync(stateFile(root), "utf-8")).lastSnapAt)
+})
+
+// 9 契约测试（DFB-20261021-002 B1 blocker）：文档写 DEEPFREEZE_SCRIPT（2 个 E），
+// 插件曾写 DEEEPFREEZE_SCRIPT（3 个 E）——「测试与 bug 自洽」的 8/8 假绿盖住了
+// 契约断裂（sir 按文档名设 env，插件读不到 → 核心能力从未触发）。
+// 本测试逐字对照 README 配置表 + 硬断言「按文档名设 env → protect 触发」。
+await check("9 契约: 按文档名 DEEPFREEZE_SCRIPT 设 env → protect 必须触发（防 typo 再脱节）", async () => {
+  // 硬断言 1：本测试用的 env key 必须与 README 配置表逐字一致
+  // （README 里还有 deepfreeze 原有的 DEEPFREEZE_ALLOWED_ROOT，所以必须收窄到
+  //  宿主集成配置表中「deepfreeze.ps1 绝对路径」那一行，不能取第一个匹配）
+  const readme = readFileSync("README.md", "utf-8")
+  // 安全设计表的「规模护栏」行也提到 deepfreeze.ps1（line 160）——必须同时要求
+  // 大写 DEEPFREEZE 才能锁定宿主集成配置表的 DEEPFREEZE_SCRIPT 行
+  const tableRow = readme.split("\n").find(l => l.includes("|") && l.includes("DEEPFREEZE") && l.includes("deepfreeze.ps1"))
+  assert.ok(tableRow, "README 宿主集成配置表里找不到 DEEPFREEZE_SCRIPT 行 —— 测试与文档已脱节")
+  const docName = tableRow.match(/`([A-Z_]+)`/)?.[1]
+  assert.equal(docName, "DEEPFREEZE_SCRIPT", `文档 env 名漂移: ${docName}`)
+  // 硬断言 2：插件源码读取的每个 env 名都必须在 README 配置表里记载
+  const src = readFileSync(pluginPath, "utf-8")
+  const readSites = [...src.matchAll(/process\.env\.([A-Z_]+)/g)].map(m => m[1])
+  for (const name of readSites) {
+    assert.ok(readme.includes(`\`${name}\``),
+      `插件读取了文档没记载的 env: ${name} —— 契约断裂（B1 同族）`)
+  }
+  // 行为断言：按文档名设 env（清掉可能的旧错名残留）→ 必须触发
+  const root = makeTempRoot()
+  writeFileSync(join(root, ".deepfreeze-autosnap"), "")
+  const dummyLog = scenarioLog()
+  const script = writeDummyPs1(tmp, dummyLog)
+  const hooks = await makePlugin({ script })
+  await callHook(hooks, "edit", join(root, "a.txt"))
+  assert.ok(existsSync(dummyLog),
+    "按文档名 DEEPFREEZE_SCRIPT 设 env 但 protect 未触发 —— 契约断裂复发")
 })
 
 // cleanup
