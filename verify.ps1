@@ -420,7 +420,21 @@ Check 'H4 源A history 只见自己的快照 (1 个, 跨源不可见)' (([regex]
 $null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')   # 不带 -SnapshotRoot: 应循 state.json 留在共享库
 Check 'H4 重复 protect 不带参数仍落共享库 (未回退默认落点)' (-not (Test-Path -LiteralPath "$Sandbox\.freeze-snap"))
 $hSnaps = @(Get-ChildItem -LiteralPath $HStore -Recurse -Directory -Filter 'snap-*' -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.tmp')
-Check 'H4 共享库快照总数=3 (A:2 + B:1, 各源隔离无混写)' ($hSnaps.Count -eq 3) "实际 $($hSnaps.Count)"
+# D2 (DFB-20261021-003): 原精确计数 `= 3` 对负载敏感（评审 RUN4 实测漂移——
+# 跨源混写边界的高负载下 srcKey 枚举时序抖动）。精确总数不是「跨源隔离」
+# 不变量的承载体——真正的隔离语义已由上面三条断言承载（srcKey 互异 / 源A
+# history 跨源不可见 / 落点不回退默认）。总数改「≥ 各源应有下限」的宽松断言：
+# 混写会让某个 srcKey 的快照数异常，这里只确认没有丢快照，不锁精确总数。
+Check 'H4 共享库快照总数下限 (A:2 + B:1 = 3, 无丢失; 混写由隔离断言承载)' ($hSnaps.Count -ge 3) "实际 $($hSnaps.Count)"
+# 隔离语义加强: 每个 srcKey 目录（快照 FullName 的倒数第 2 段）的快照数必须
+# ∈ {1, 2}（A=2 / B=1 的合法集合），且两个 srcKey 的计数互异——混写（源B 的
+# 快照出现在源A 的 srcKey 下）会让某侧计数冲出集合或两侧相等，这比总数断言
+# 对「无混写」不变量的保护更强，且不依赖 Get-ChildItem 的枚举顺序。
+$hKeyCounts = $hSnaps | ForEach-Object { ($_.FullName -split '\\')[-2] } | Group-Object
+foreach ($g in $hKeyCounts) {
+    Check "H4 srcKey $($g.Name) 快照数 ∈ {1,2} (各源隔离无混写)" (@(1,2) -contains $g.Count) "实际 $($g.Count)"
+}
+Check 'H4 两个 srcKey 的快照数互异 (2 vs 1; 混写会使两侧相等或越界)' ($hKeyCounts.Count -eq 2 -and ($hKeyCounts | ForEach-Object { $_.Count } | Select-Object -Unique).Count -eq 2) "srcKey 数=$($hKeyCounts.Count), 计数集=$(@($hKeyCounts | ForEach-Object { $_.Count }) -join ',')"
 
 Write-Host "  [H5] 向后兼容: 旧 state.json (无 snapshot_root 字段) 不崩, 回落默认位置"
 $hstate = Get-Content -LiteralPath "$Sandbox\.freeze\state.json" -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -528,6 +542,14 @@ $qCompact = Get-Content -LiteralPath $qMan -Raw -Encoding UTF8 | ConvertFrom-Jso
 [System.IO.File]::WriteAllText($qMan, $qCompact, (New-Object System.Text.UTF8Encoding($true)))
 $r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
 Check 'Q2 紧凑格式 history 被拒 (exit 非 0, 不静默数成 1)' ($r.Code -ne 0) "exit=$($r.Code) $($r.Out)"
+# D1 (DFB-20261021-003): 消息断言容时序——负载下 stderr 的 ReadToEndAsync 与
+# 进程退出存在竞态，$r.Out 可能截断丢掉报错行（评审 RUN2 实测失败项）。匹配
+# 失败允许重跑一次再匹配（环境类补测）；两次都缺才 FAIL——真失败（报错内容
+# 本身错了）重跑后仍缺，不被吞，fail-closed 保留。
+if ($r.Out -notmatch '格式异常') {
+    Write-Warning 'Q2 消息断言未命中 (疑似 stderr 截断), 重跑一次再匹配'
+    $r = Invoke-Deepfreeze @('history', '-Source', $Sandbox)
+}
 Check 'Q2 报错含格式异常说明 (fail-closed, 未静默回退全量解析)' ($r.Out -match '格式异常') $r.Out
 
 Write-Host '  [Q3] 空 manifest (files=[] 多行) 不被误判为紧凑格式'
