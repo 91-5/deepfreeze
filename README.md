@@ -243,8 +243,8 @@ deepfreeze 与 `agent-covenant` 的融合分四期，**当前只落地期 1**—
 
 其他边界：
 
-- 保护对象是**普通数据目录**；`/MIR` 会删目标里快照后新增的文件——这是特性不是 bug，但被保护目录别当垃圾场
-- `prerestore-*` 备份与快照是两套东西：快照是「回到某个时间点」，prerestore 是「还原出错时退回还原前」，语义不同，不合并
+- 保护对象是**普通数据目录**；`/MIR` 对快照后新增的文件**不再直接删除**——期 4a（DFB-20261023-001）起它们被**移入 `.freeze\quarantine\<ts>\` 保全**（保留相对路径结构 + manifest 记录原路径/SHA/原因），误删可按 manifest 找回；quarantine 不自动清（无 TTL），`unprotect -Purge` 连它一起清，人工管理
+- `prerestore-*` 备份与快照与 quarantine 是三套东西：快照是「回到某个时间点」，prerestore 是「还原出错时退回还原前」，quarantine 是「快照后新增文件的精确保全」——语义不同，不合并
 - 规模护栏挡的是「合法但危险」的调用（整盘/边界级 protect），不挡正常项目目录；`-ForceLarge` 是给「我就是知道它很大、我就是要保护」的场景留的显式出口，不是常规参数
 
 ## 宿主集成（OpenCode 插件 · 期 3，DFB-20261021-002）
@@ -289,3 +289,14 @@ fail-open/失败后重试/状态原子性——走真实 PowerShell 子进程，
 | `verify.ps1` | 自检 |
 | `tools/autosnap-selftest.mjs` | 期 3 插件的验收测试（bun 跑） |
 | `_selftest\` | 自检夹具（自动重建，已 gitignore） |
+
+## quarantine 保全（期 4a，DFB-20261023-001）
+
+restore 时「快照后新增的文件」**移入 `.freeze\quarantine\<时间戳>\`** 而非删除（保留相对
+路径结构），并写 `manifest.json`（原路径 / SHA256 / 原因 / snap 引用）。此前这些文件被
+`/MIR` 直接删除——误删的合法工作混在 prerestore 整目录备份里难以找回；quarantine
+精确保全、按 manifest 可查可找回。
+
+- **不自动清**（无 TTL）：quarantine 靠人工管理——确认不需要后手动删，或 `unprotect -Purge` 连它一起清
+- **deepfreeze 独立性**：quarantine 收全部快照后新增文件，不读 covenant 的任何清单做分类
+- **fail-closed**：quarantine 移动失败（磁盘满/权限）→ restore 中止（不半途还原）

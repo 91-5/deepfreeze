@@ -708,6 +708,58 @@ $c11After = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\manifests" -File -Fil
 Check 'C11 坏 link 触发 BlockAll 警告 (manifest 轮转已暂停)' ($r.Out -match '轮转已暂停') $r.Out
 Check 'C11 坏 link 时 manifest 只增不减 (不删任何清单)' ($c11After -ge $c11Before) "before=$c11Before after=$c11After"
 
+# ---------- R1~R6 quarantine 保全矩阵 (DFB-20261023-001, 期 4a: 快照后新增文件移入 quarantine 而非删除) ----------
+Write-Host "`n[R] quarantine 保全矩阵 (期 4a): restore 时快照后新增文件保全可找回"
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+# 破坏 a.txt（变更，restore 会覆盖）+ 新增 new1.txt/new2.txt（快照后新增，restore 会保全）
+'tampered' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+'new-one' | Set-Content -LiteralPath "$Sandbox\new1.txt" -Encoding UTF8
+'new-two' | Set-Content -LiteralPath "$Sandbox\sub\new2.txt" -Encoding UTF8
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'R1 restore 成功 (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Out)"
+Check 'R2 快照还原正确 (a.txt 回到 alpha-content)' (((Get-Content -LiteralPath "$Sandbox\a.txt" -Raw).TrimEnd("`r","`n")) -eq 'alpha-content')
+# quarantine: 新增文件移入 .freeze\quarantine\<ts>\ 且保留相对路径结构
+$qRoots = @(Get-ChildItem -LiteralPath "$Sandbox\.freeze\quarantine" -Directory -ErrorAction SilentlyContinue)
+Check 'R3 quarantine 目录产生 (.freeze\quarantine\<ts>)' ($qRoots.Count -ge 1) "实际 $($qRoots.Count)"
+if ($qRoots.Count -ge 1) {
+    $qDir = $qRoots[-1].FullName
+    Check 'R4 新增文件保全且内容完好 (new1.txt)' (((Get-Content -LiteralPath "$qDir\new1.txt" -Raw -ErrorAction SilentlyContinue).TrimEnd("`r","`n")) -eq 'new-one')
+    Check 'R4 子目录结构保留 (sub\new2.txt)' (((Get-Content -LiteralPath "$qDir\sub\new2.txt" -Raw -ErrorAction SilentlyContinue).TrimEnd("`r","`n")) -eq 'new-two')
+    # manifest: 字段正确（path/sha256/reason/snap_ref）
+    $qManPath = Join-Path $qDir 'manifest.json'
+    Check 'R5 manifest 存在' (Test-Path -LiteralPath $qManPath)
+    if (Test-Path -LiteralPath $qManPath) {
+        $qMan = Get-Content -LiteralPath $qManPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $new1 = @($qMan.files | Where-Object { $_.path -eq 'new1.txt' })
+        Check 'R5 manifest 记录 path/sha256/reason/snap_ref' ($new1.Count -eq 1 -and $new1[0].sha256 -match '^[0-9a-f]{64}' -and $new1[0].reason -match 'quarantined' -and $new1[0].snap_ref -match '^snap-')
+    }
+}
+Check 'R6 源目录的新增文件已移走 (new1.txt 不在源根)' (-not (Test-Path -LiteralPath "$Sandbox\new1.txt"))
+
+# R7 无新增文件的 restore → 不产生 quarantine 目录
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+'tampered' | Set-Content -LiteralPath "$Sandbox\a.txt" -Encoding UTF8
+$r = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'R7 无新增文件的 restore 不产生 quarantine (diff.New=0)' ($r.Code -ne 0 -or -not (Test-Path -LiteralPath "$Sandbox\.freeze\quarantine"))
+
+# R8 unprotect -Purge 连 quarantine 一起清
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+'new-x' | Set-Content -LiteralPath "$Sandbox\newx.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+Check 'R8 前置: quarantine 已产生' (Test-Path -LiteralPath "$Sandbox\.freeze\quarantine")
+$null = Invoke-Deepfreeze @('unprotect', '-Source', $Sandbox, '-Purge', '-AutoConfirm')
+Check 'R8 unprotect -Purge 连 quarantine 一起清' (-not (Test-Path -LiteralPath "$Sandbox\.freeze\quarantine"))
+
+# R9 quarantine 不进快照（.freeze 在 /XD 排除列表，快照里搜不到 quarantine）
+Reset-Sandbox
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+'new-y' | Set-Content -LiteralPath "$Sandbox\newy.txt" -Encoding UTF8
+$null = Invoke-Deepfreeze @('restore', '-Source', $Sandbox, '-AutoConfirm')
+$null = Invoke-Deepfreeze @('protect', '-Source', $Sandbox, '-AutoConfirm')
+Check 'R9 quarantine 不进快照 (/XD 排除)' (-not (Test-Path -LiteralPath "$Sandbox\.freeze-snap\snap-*\quarantine"))
 
 # ---------- 清理 ----------
 if (Test-Path -LiteralPath "$HSrcB\.freeze") { $null = Invoke-Deepfreeze @('unprotect', '-Source', $HSrcB, '-Purge', '-AutoConfirm') }

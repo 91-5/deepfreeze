@@ -527,16 +527,51 @@ switch ($Action) {
 
     # diff 预览: 让用户在确认前知情 (REVIEW-001 建议 #5)
     $diff = Get-Diff -Root $Source -ManifestPath $manifestPath
-    $desc = "restore 到 snap-$ts (镜像快照覆盖目标; 将删除 $($diff.New.Count) 个快照后新增文件, 覆盖/恢复 $($diff.Changed.Count + $diff.Missing.Count) 个文件, 快照共 $($diff.Total) 个)"
+    $desc = "restore 到 snap-$ts (镜像快照覆盖目标; 将保全 $($diff.New.Count) 个快照后新增文件到 quarantine, 覆盖/恢复 $($diff.Changed.Count + $diff.Missing.Count) 个文件, 快照共 $($diff.Total) 个)"
     Write-Log "diff 预览: 新增 $($diff.New.Count) / 变更 $($diff.Changed.Count) / 缺失 $($diff.Missing.Count) (快照 $($diff.Total) 个)"
     if (-not (Test-Gate -Description "restore: $desc")) { Write-Host '已取消'; return }
+
+    # 1.5) quarantine 保全 (DFB-20261023-001, 期 4a): 快照后新增的文件移入
+    # .freeze\quarantine\<restore-ts>\（保留相对路径结构）+ manifest（原路径/SHA/原因）。
+    # 此前这些文件被 /MIR 直接删除（冰点语义）——误删的合法工作混在 prerestore 整目录
+    # 备份里难以找回。quarantine 精确保全 + 可查 manifest；/MIR 照常（移走后无可删）。
+    # deepfreeze 独立性：不读 covenant 的任何文件做分类，quarantine 收全部快照后新增，
+    # 人工从 manifest 挑。fail-closed：移动失败 → restore 中止（不半途还原）。
+    $qFiles = @()
+    if ($diff.New.Count -gt 0) {
+      $qDir = Join-Path $StateDir ("quarantine\" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+      $qManifestEntries = @()
+      $shaQ = [System.Security.Cryptography.SHA256]::Create()
+      foreach ($rel in $diff.New) {
+        $absPath = Join-Path $Source $rel
+        if (-not (Test-Path -LiteralPath $absPath)) { continue }
+        $qTarget = Join-Path $qDir $rel
+        $qTargetParent = Split-Path -Parent $qTarget
+        New-Item -ItemType Directory -Force -Path $qTargetParent | Out-Null
+        Move-Item -LiteralPath $absPath -Destination $qTarget -Force
+        $qHash = Get-Sha256Hex -Path $qTarget -Sha $shaQ
+        $qManifestEntries += [ordered]@{
+          path     = $rel
+          sha256   = $qHash
+          reason   = "restore snap-$ts quarantined (快照后新增)"
+          card     = if ($cardProvided) { $Card } else { $null }
+          snap_ref = "snap-$ts"
+        }
+        $qFiles += $rel
+      }
+      if ($qManifestEntries.Count -gt 0) {
+        $qManifest = [ordered]@{ created_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); source = $Source; snap_ref = "snap-$ts"; files = $qManifestEntries }
+        ($qManifest | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $qDir "manifest.json") -Encoding UTF8
+      }
+      Write-Log "quarantine 保全: $($qFiles.Count) 个快照后新增文件 → $qDir"
+    }
 
     # 1) 还原前自保: 当前状态先备份
     $preDir = Join-Path $StateDir ("prerestore-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     Invoke-RobocopyMirror -Src $Source -Dst $preDir
     Write-Log "pre-restore 备份完成: $preDir"
 
-    # 2) 镜像快照回源 (/MIR: 快照后新增的文件会被删除 —— 冰点的语义)
+    # 2) 镜像快照回源 (/MIR: 新增文件已移入 quarantine, 此处无可删)
     Invoke-RobocopyMirror -Src $snapDir -Dst $Source -Delete
     Write-Log "restore 镜像完成: snap-$ts -> $Source"
 
@@ -634,6 +669,9 @@ switch ($Action) {
         Write-Log "  同时清理默认位置的遗留快照: $DefaultSnapRoot"
       }
       Remove-Item -LiteralPath $ManifestsDir -Recurse -Force -ErrorAction SilentlyContinue
+      # quarantine 保全目录 (DFB-20261023-001): -Purge 连它一起清 —— 状态都删了,
+      # quarantine 的保留无意义 (且防"状态没了 quarantine 还滚雪球")
+      Remove-Item -LiteralPath (Join-Path $StateDir 'quarantine') -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
       # 措辞对齐实际行为(返工单 C3): -Purge 删快照/清单/状态, 但 actions.log 审计日志保留
       # (与本项目「事故可追溯」基调一致, 删审计日志比留它更糟), 故明说保留而非宣称全删
